@@ -305,6 +305,114 @@ func ExtractTokenFromHeader(authHeader string) (string, error) {
 	return token, nil
 }
 
+// MCP OAuth User Claims used when generating proxy-issued access tokens
+type MCPUserClaims struct {
+	UserID   string   `json:"sub"`
+	Username string   `json:"username"`
+	Email    string   `json:"email"`
+	Groups   []string `json:"groups"`
+	Roles    []string `json:"roles"`
+	ClientID string   `json:"client_id"`
+}
+
+// GenerateOAuthAccessToken generates a proxy-issued JWT access token with MCP-specific claims.
+func (tm *TokenManager) GenerateOAuthAccessToken(claims *MCPUserClaims, scopes string, lifetimeMinutes int) (string, time.Time, error) {
+	if lifetimeMinutes <= 0 {
+		lifetimeMinutes = 60 // default 1 hour
+	}
+
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(lifetimeMinutes) * time.Minute)
+	tokenID := tm.generateTokenID()
+
+	jwtClaims := jwt.MapClaims{
+		"jti":       tokenID,
+		"iss":       tm.issuer,
+		"sub":       claims.UserID,
+		"aud":       tm.issuer,
+		"iat":       now.Unix(),
+		"exp":       expiresAt.Unix(),
+		"scope":     scopes,
+		"token_use": "access",
+		"client_id": claims.ClientID,
+		"username":  claims.Username,
+		"email":     claims.Email,
+		"groups":    claims.Groups,
+		"roles":     claims.Roles,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwtClaims)
+	signedToken, err := token.SignedString(tm.privateKey)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to sign OAuth access token: %w", err)
+	}
+
+	return signedToken, expiresAt, nil
+}
+
+// GenerateOAuthRefreshToken generates a secure refresh token for OAuth sessions.
+func (tm *TokenManager) GenerateOAuthRefreshToken(userID, clientID string, lifetimeMinutes int) (string, time.Time, error) {
+	if lifetimeMinutes <= 0 {
+		lifetimeMinutes = 1440 // default 24 hours
+	}
+
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to generate refresh token: %w", err)
+	}
+
+	expiresAt := time.Now().Add(time.Duration(lifetimeMinutes) * time.Minute)
+	data := fmt.Sprintf("%s:%s:%d:%s", userID, clientID, time.Now().Unix(), base64.URLEncoding.EncodeToString(bytes))
+	token := base64.URLEncoding.EncodeToString([]byte(data))
+
+	return token, expiresAt, nil
+}
+
+// ValidateOAuthToken validates a proxy-issued OAuth JWT and returns the claims.
+// Unlike ValidateToken, this validates against the proxy's own issuer as audience.
+func (tm *TokenManager) ValidateOAuthToken(tokenString string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return &tm.privateKey.PublicKey, nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse token: %w", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid token claims")
+	}
+
+	// Validate issuer
+	if iss, ok := claims["iss"].(string); ok {
+		if iss != tm.issuer {
+			return nil, fmt.Errorf("invalid issuer: expected %s, got %s", tm.issuer, iss)
+		}
+	} else {
+		return nil, fmt.Errorf("missing issuer claim")
+	}
+
+	// Validate expiration
+	if exp, ok := claims["exp"].(float64); ok {
+		if time.Now().Unix() > int64(exp) {
+			return nil, fmt.Errorf("token has expired")
+		}
+	} else {
+		return nil, fmt.Errorf("missing expiration claim")
+	}
+
+	return claims, nil
+}
+
+// GetIssuer returns the configured issuer URL.
+func (tm *TokenManager) GetIssuer() string {
+	return tm.issuer
+}
+
 // Common authentication error codes
 const (
 	ErrCodeMissingAuth     = "MISSING_AUTH_HEADER"

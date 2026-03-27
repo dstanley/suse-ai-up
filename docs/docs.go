@@ -5342,7 +5342,7 @@ var SwaggerInfo = &swag.Spec{
 	Host:             "localhost:8911",
 	BasePath:         "/",
 	Schemes:          []string{},
-	Title:            "SUSE AI Uniproxy API",
+	Title:            "SUSE AI Universal Proxy API",
 	Description:      "A comprehensive, modular MCP (Model Context Protocol) proxy system",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,

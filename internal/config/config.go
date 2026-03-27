@@ -82,6 +82,19 @@ type Config struct {
 	DataDir              string `json:"data_dir"`
 	StorageEncryptionKey string `json:"storage_encryption_key"`
 
+	// OAuth Authorization Server configuration
+	OAuthIssuerURL              string   `json:"oauth_issuer_url"`
+	OAuthAccessTokenLifetime    int      `json:"oauth_access_token_lifetime"`    // minutes, default 60
+	OAuthRefreshTokenLifetime   int      `json:"oauth_refresh_token_lifetime"`   // minutes, default 1440 (24h)
+	OAuthRegistrationRateLimit  int      `json:"oauth_registration_rate_limit"`  // per IP per minute, default 10
+	OAuthRedirectURIAllowlist   []string `json:"oauth_redirect_uri_allowlist"`   // empty = allow all
+	OAuthCodeLifetime           int      `json:"oauth_code_lifetime"`            // minutes, default 10
+
+	// SPIFFE/SPIRE configuration
+	SPIREEnabled          bool   `json:"spire_enabled"`
+	SPIREAgentSocketPath  string `json:"spire_agent_socket_path"`
+	SPIFFEDefaultAudience string `json:"spiffe_default_audience"`
+
 	// OpenTelemetry configuration
 	OtelEnabled  bool   `json:"otel_enabled"`
 	OtelEndpoint string `json:"otel_endpoint"`
@@ -196,6 +209,19 @@ func LoadConfig() *Config {
 		// Storage configuration
 		DataDir:              getEnv("DATA_DIR", "/data"),
 		StorageEncryptionKey: getEnv("STORAGE_ENCRYPTION_KEY", ""),
+
+		// OAuth Authorization Server configuration
+		OAuthIssuerURL:             getEnv("OAUTH_ISSUER_URL", ""),
+		OAuthAccessTokenLifetime:   getEnvInt("OAUTH_ACCESS_TOKEN_LIFETIME", 60),
+		OAuthRefreshTokenLifetime:  getEnvInt("OAUTH_REFRESH_TOKEN_LIFETIME", 1440),
+		OAuthRegistrationRateLimit: getEnvInt("OAUTH_REGISTRATION_RATE_LIMIT", 10),
+		OAuthRedirectURIAllowlist:  parseStringSlice(getEnv("OAUTH_REDIRECT_URI_ALLOWLIST", "")),
+		OAuthCodeLifetime:          getEnvInt("OAUTH_CODE_LIFETIME", 10),
+
+		// SPIFFE/SPIRE configuration
+		SPIREEnabled:          getEnvBool("SPIRE_ENABLED", false),
+		SPIREAgentSocketPath:  getEnv("SPIRE_AGENT_SOCKET_PATH", "/tmp/spire-agent/public/api.sock"),
+		SPIFFEDefaultAudience: getEnv("SPIFFE_DEFAULT_AUDIENCE", ""),
 
 		// OpenTelemetry configuration
 		OtelEnabled:  getEnvBool("OTEL_ENABLED", false),

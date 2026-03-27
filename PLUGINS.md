@@ -1,10 +1,10 @@
-# SUSE AI Uniproxy Plugin System
+# SUSE AI Universal Proxy Plugin System
 
-SUSE AI Uniproxy supports an extensibility model where external services ("plugins") can register themselves dynamically to extend the proxy's capabilities. This allows for modular addition of features like new MCP server sources (VirtualMCP), smart agents, or registry providers without recompiling the core binary.
+SUSE AI Universal Proxy supports an extensibility model where external services ("plugins") can register themselves dynamically to extend the proxy's capabilities. This allows for modular addition of features like new MCP server sources (VirtualMCP), smart agents, or registry providers without recompiling the core binary.
 
 ## Architecture
 
-Plugins in SUSE AI Uniproxy are standalone HTTP services that:
+Plugins in SUSE AI Universal Proxy are standalone HTTP services that:
 1.  **Register** themselves with the Uniproxy upon startup.
 2.  **Expose** required endpoints (Health checks, Discovery) that the Uniproxy consumes.
 3.  **Heartbeat** via periodic health checks initiated by the Uniproxy.

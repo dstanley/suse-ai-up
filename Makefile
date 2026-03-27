@@ -35,7 +35,7 @@ helm-test: helm-upgrade
 
 # Local testing without Kubernetes
 test-local: build
-	@echo "Starting SUSE AI Uniproxy locally..."
+	@echo "Starting SUSE AI Universal Proxy locally..."
 	./suse-ai-up &
 	@echo "Waiting for service to start..."
 	@sleep 10

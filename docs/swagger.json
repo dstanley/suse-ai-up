@@ -2,7 +2,7 @@
     "swagger": "2.0",
     "info": {
         "description": "A comprehensive, modular MCP (Model Context Protocol) proxy system",
-        "title": "SUSE AI Uniproxy API",
+        "title": "SUSE AI Universal Proxy API",
         "termsOfService": "http://swagger.io/terms/",
         "contact": {
             "name": "SUSE",

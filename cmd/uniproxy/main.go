@@ -28,6 +28,7 @@ import (
 	_ "suse-ai-up/docs"
 	"suse-ai-up/internal/config"
 	"suse-ai-up/internal/handlers"
+	"suse-ai-up/internal/service"
 	"suse-ai-up/pkg/auth"
 	"suse-ai-up/pkg/clients"
 	"suse-ai-up/pkg/logging"
@@ -383,7 +384,7 @@ func initOTEL(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-// @title SUSE AI Uniproxy API
+// @title SUSE AI Universal Proxy API
 // @version 1.0
 // @description A comprehensive, modular MCP (Model Context Protocol) proxy system
 // @termsOfService http://swagger.io/terms/
@@ -402,7 +403,7 @@ func initOTEL(ctx context.Context, cfg *config.Config) error {
 // @in header
 // @name X-API-Key
 
-// RunUniproxy starts the SUSE AI Uniproxy service
+// RunUniproxy starts the SUSE AI Universal Proxy service
 func RunUniproxy() {
 	log.Printf("MAIN FUNCTION STARTED")
 	// Load configuration
@@ -503,6 +504,35 @@ func RunUniproxy() {
 
 	// Initialize auth service
 	userAuthService := auth.NewUserAuthService(userStore, tokenManager, userAuthConfig)
+
+	// Initialize OAuth AS components
+	auditLogger := auth.NewAuditLogger()
+	oauthClientStorePath := filepath.Join(cfg.DataDir, "oauth_clients.json")
+	oauthClientStore := clients.NewFileOAuthClientStore(oauthClientStorePath, crypto)
+	oauthServerService := service.NewOAuthServerService(tokenManager, oauthClientStore, auditLogger, cfg)
+	oauthServerHandler := handlers.NewOAuthServerHandler(oauthServerService, auditLogger, cfg)
+	wellKnownHandler := handlers.NewWellKnownHandler(cfg.OAuthIssuerURL)
+
+	// Authorization policy store and engine
+	policyStorePath := filepath.Join(cfg.DataDir, "auth_policies.json")
+	policyStore := clients.NewFileAuthPolicyStore(policyStorePath, crypto)
+	oauthServerHandler.SetPolicyStore(policyStore)
+
+	// Token vault (in-memory only — exchanged tokens don't survive restarts)
+	tokenVaultStore := clients.NewInMemoryTokenVaultStore()
+	tokenVaultService := service.NewTokenVaultService(tokenVaultStore, auditLogger)
+
+	// SPIFFE/SPIRE workload identity (optional)
+	if cfg.SPIREEnabled {
+		spiffeClient, err := auth.NewSPIFFEClient(cfg.SPIREAgentSocketPath)
+		if err != nil {
+			log.Printf("Warning: SPIRE enabled but agent not available: %v", err)
+		} else {
+			tokenVaultService.SetSPIFFEClient(spiffeClient)
+			defer spiffeClient.Close()
+			log.Printf("SPIFFE/SPIRE workload identity enabled (agent: %s)", cfg.SPIREAgentSocketPath)
+		}
+	}
 
 	// Create initial groups
 	log.Printf("DEBUG: CreateInitialGroups: %v, Groups count: %d", cfg.CreateInitialGroups, len(cfg.InitialGroups))
@@ -706,6 +736,29 @@ func RunUniproxy() {
 
 	// Swagger UI - use relative URL for deployment compatibility
 	r.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.URL("/docs/doc.json")))
+
+	// Well-known discovery endpoints (RFC 9728, RFC 8414)
+	r.GET("/.well-known/oauth-protected-resource", wellKnownHandler.GetProtectedResourceMetadata)
+	r.GET("/.well-known/oauth-authorization-server", wellKnownHandler.GetAuthorizationServerMetadata)
+
+	// OAuth 2.1 Authorization Server endpoints
+	oauth := r.Group("/oauth")
+	{
+		oauth.POST("/register", oauthServerHandler.Register)
+		oauth.GET("/authorize", oauthServerHandler.Authorize)
+		oauth.GET("/callback", oauthServerHandler.Callback)
+		oauth.POST("/token", oauthServerHandler.Token)
+		oauth.POST("/revoke", oauthServerHandler.Revoke)
+	}
+
+	// Authorization policy admin endpoints
+	authPolicies := r.Group("/api/v1/auth/policies")
+	{
+		authPolicies.GET("", oauthServerHandler.ListPolicies)
+		authPolicies.POST("", oauthServerHandler.CreatePolicy)
+		authPolicies.PUT("/:id", oauthServerHandler.UpdatePolicy)
+		authPolicies.DELETE("/:id", oauthServerHandler.DeletePolicy)
+	}
 
 	// API v1 routes
 	logging.ProxyLogger.Info("Setting up API v1 routes")
@@ -1714,7 +1767,7 @@ func handleMCPProxy(c *gin.Context, adapterStore clients.AdapterResourceStore, s
 	}
 }
 
-// main is the entry point for the SUSE AI Uniproxy service
+// main is the entry point for the SUSE AI Universal Proxy service
 func main() {
 	RunUniproxy()
 }

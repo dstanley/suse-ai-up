@@ -380,11 +380,27 @@ type APIKeyConfig struct {
 // AdapterAuthConfig represents authentication configuration for an adapter
 type AdapterAuthConfig struct {
 	Required    bool               `json:"required"` // true = require auth, false = optional
-	Type        string             `json:"type"`     // "bearer", "oauth", "basic", "apikey", "none"
+	Type        string             `json:"type"`     // "bearer", "oauth", "basic", "apikey", "token_exchange", "service_account", "spiffe", "none"
 	BearerToken *BearerTokenConfig `json:"bearerToken,omitempty"`
 	OAuth       *OAuthConfig       `json:"oauth,omitempty"`
 	Basic       *BasicAuthConfig   `json:"basic,omitempty"`
 	APIKey      *APIKeyConfig      `json:"apiKey,omitempty"`
+	// Token exchange configuration for cross-identity-boundary scenarios (RFC 8693)
+	TokenExchange *TokenExchangeConfig `json:"tokenExchange,omitempty"`
+	// Service account with user impersonation configuration
+	ServiceAccount *ServiceAccountConfig `json:"serviceAccount,omitempty"`
+	// SPIFFE/SPIRE workload identity configuration
+	SPIFFE *SPIFFEAuthConfig `json:"spiffe,omitempty"`
+}
+
+// SPIFFEAuthConfig represents SPIFFE/SPIRE workload identity authentication configuration.
+type SPIFFEAuthConfig struct {
+	// TargetAudience is the audience claim for JWT SVIDs (required for token exchange)
+	TargetAudience string `json:"target_audience,omitempty"`
+	// UseMTLS enables X.509 SVID mTLS for downstream calls instead of bearer tokens
+	UseMTLS bool `json:"use_mtls"`
+	// SocketPath overrides the global SPIRE agent socket path for this adapter
+	SocketPath string `json:"socket_path,omitempty"`
 }
 
 // UserAuthProvider represents supported user authentication providers

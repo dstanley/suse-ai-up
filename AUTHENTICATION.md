@@ -1,8 +1,8 @@
-# SUSE AI Uniproxy Authentication Guide
+# SUSE AI Universal Proxy Authentication Guide
 
 ## Overview
 
-This document explains how to configure and use authentication in SUSE AI Uniproxy, supporting multiple providers including local authentication, GitHub OAuth, and Rancher OIDC.
+This document explains how to configure and use authentication in SUSE AI Universal Proxy, supporting multiple providers including local authentication, GitHub OAuth, and Rancher OIDC.
 
 ## Quick Start
 

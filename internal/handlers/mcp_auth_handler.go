@@ -50,7 +50,29 @@ func (h *MCPAuthHandler) GetClientToken(c *gin.Context) {
 		return
 	}
 
-	// Get client token
+	// For user-context auth types, use the authenticated user's identity
+	if adapter.Authentication != nil &&
+		(adapter.Authentication.Type == "token_exchange" || adapter.Authentication.Type == "service_account" || adapter.Authentication.Type == "spiffe") {
+		userID, _ := c.Get("user_id")
+		accessToken, _ := c.Get("access_token")
+		userIDStr, _ := userID.(string)
+		accessTokenStr, _ := accessToken.(string)
+
+		if userIDStr == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User authentication required for this adapter type"})
+			return
+		}
+
+		tokenResponse, err := h.authIntegration.GetUserToken(*adapter, userIDStr, accessTokenStr)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, tokenResponse)
+		return
+	}
+
+	// Get client token for non-user-context auth types
 	tokenResponse, err := h.authIntegration.GetClientToken(*adapter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

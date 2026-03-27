@@ -650,8 +650,16 @@ func RunUniproxy() {
 	scanManager := scanner.NewScanManager(networkScanner, discoveryStore)
 	discoveryHandler := handlers.NewDiscoveryHandler(scanManager, discoveryStore)
 	tokenHandler := handlers.NewTokenHandler(adapterStore, tokenManager)
-	// mcpAuthIntegration := service.NewMCPAuthIntegrationService(tokenManager)
-	mcpAuthHandler := handlers.NewMCPAuthHandler(adapterStore, nil)
+	// MCP auth integration — wires token exchange, service account, and SPIFFE auth
+	authIntegrationService := service.NewMCPAuthIntegrationService(tokenManager)
+	authIntegrationService.SetTokenVaultService(tokenVaultService)
+	authIntegrationService.SetOAuthService(oauthServerService)
+
+	// Tool-level authorization policy engine
+	policyEngine := auth.NewPolicyEngine(policyStore)
+	toolAuthService := service.NewToolAuthorizationService(policyEngine, auditLogger)
+
+	mcpAuthHandler := handlers.NewMCPAuthHandler(adapterStore, authIntegrationService)
 
 	// Initialize missing handlers
 	registryStore := clients.NewFileMCPServerStore(mcpServerStorePath, crypto)
@@ -664,6 +672,12 @@ func RunUniproxy() {
 	adapterHandler := handlers.NewAdapterHandler(adapterService, userGroupService)
 	logging.ProxyLogger.Info("AdapterHandler created: %v", adapterHandler != nil)
 	logging.ProxyLogger.Success("AdapterService and AdapterHandler initialized")
+
+	// Initialize UnifiedMCPHandler for aggregated MCP endpoint
+	unifiedMCPHandler := handlers.NewUnifiedMCPHandler(adapterService, userGroupService)
+	unifiedMCPHandler.SetAuthIntegration(authIntegrationService)
+	unifiedMCPHandler.SetToolAuthService(toolAuthService)
+	logging.ProxyLogger.Info("UnifiedMCPHandler created: %v", unifiedMCPHandler != nil)
 
 	// Adapter handlers are now used directly in Gin routes
 
@@ -850,6 +864,11 @@ func RunUniproxy() {
 				handleMCPPromptGet(c, adapterStore, stdioToHTTPAdapter, remoteHTTPPlugin, sessionStore)
 			})
 		}
+
+		// Unified MCP endpoint - aggregates all adapters into a single MCP interface
+		// Protected by OAuth middleware; InjectOAuthContext propagates claims to the http.Request context
+		logging.ProxyLogger.Info("Setting up unified MCP endpoint")
+		v1.Any("/mcp", auth.MCPOAuthMiddleware(tokenManager), handlers.InjectOAuthContext, ginToHTTPHandler(unifiedMCPHandler.HandleUnifiedMCP))
 
 		// Registry routes
 		registry := v1.Group("/registry")

@@ -1,0 +1,53 @@
+services:
+  proxy:
+    build:
+      context: ../../../
+      dockerfile: Dockerfile
+    ports:
+      - "8911:8911"
+    environment:
+      - OAUTH_ISSUER_URL=http://localhost:8911
+      - RANCHER_ISSUER_URL=${RANCHER_ISSUER_URL:-http://rancher.example.com}
+      - RANCHER_CLIENT_ID=${RANCHER_CLIENT_ID:-demo-client}
+      - RANCHER_CLIENT_SECRET=${RANCHER_CLIENT_SECRET:-demo-secret}
+      - DATA_DIR=/data
+    volumes:
+      - proxy-data:/data
+    depends_on:
+      servicenow-mcp:
+        condition: service_healthy
+      databricks-mcp:
+        condition: service_healthy
+
+  servicenow-mcp:
+    build:
+      context: ../../servicenow-databricks-demo/servers
+      dockerfile: Dockerfile.servicenow
+    ports:
+      - "8000:8000"
+    environment:
+      - SERVICENOW_MOCK_MODE=true
+      - MCP_PORT=8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  databricks-mcp:
+    build:
+      context: ../../servicenow-databricks-demo/servers
+      dockerfile: Dockerfile.databricks
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABRICKS_MOCK_MODE=true
+      - MCP_PORT=8001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  proxy-data:

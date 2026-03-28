@@ -90,6 +90,8 @@ type Config struct {
 	OAuthRegistrationRateLimit  int      `json:"oauth_registration_rate_limit"`  // per IP per minute, default 10
 	OAuthRedirectURIAllowlist   []string `json:"oauth_redirect_uri_allowlist"`   // empty = allow all
 	OAuthCodeLifetime           int      `json:"oauth_code_lifetime"`            // minutes, default 10
+	OAuthClientTTLDays          int      `json:"oauth_client_ttl_days"`          // days of inactivity before cleanup, default 30 (0 = no expiry)
+	OAuthMaxClients             int      `json:"oauth_max_clients"`              // max registered clients, default 1000 (0 = unlimited)
 
 	// SPIFFE/SPIRE configuration
 	SPIREEnabled          bool   `json:"spire_enabled"`
@@ -219,6 +221,8 @@ func LoadConfig() *Config {
 		OAuthRegistrationRateLimit: getEnvInt("OAUTH_REGISTRATION_RATE_LIMIT", 10),
 		OAuthRedirectURIAllowlist:  parseStringSlice(getEnv("OAUTH_REDIRECT_URI_ALLOWLIST", "")),
 		OAuthCodeLifetime:          getEnvInt("OAUTH_CODE_LIFETIME", 10),
+		OAuthClientTTLDays:         getEnvInt("OAUTH_CLIENT_TTL_DAYS", 30),
+		OAuthMaxClients:            getEnvInt("OAUTH_MAX_CLIENTS", 1000),
 
 		// SPIFFE/SPIRE configuration
 		SPIREEnabled:          getEnvBool("SPIRE_ENABLED", false),

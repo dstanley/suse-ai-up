@@ -6,15 +6,16 @@ import (
 
 // OAuthRegisteredClient represents a dynamically registered MCP client (RFC 7591).
 type OAuthRegisteredClient struct {
-	ClientID                string   `json:"client_id"`
-	ClientSecret            string   `json:"client_secret,omitempty"`
-	ClientName              string   `json:"client_name"`
-	RedirectURIs            []string `json:"redirect_uris"`
-	GrantTypes              []string `json:"grant_types"`
-	ResponseTypes           []string `json:"response_types"`
-	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	ClientID                string    `json:"client_id"`
+	ClientSecret            string    `json:"client_secret,omitempty"`
+	ClientName              string    `json:"client_name"`
+	RedirectURIs            []string  `json:"redirect_uris"`
+	GrantTypes              []string  `json:"grant_types"`
+	ResponseTypes           []string  `json:"response_types"`
+	TokenEndpointAuthMethod string    `json:"token_endpoint_auth_method"`
 	CreatedAt               time.Time `json:"created_at"`
-	ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
+	ClientIDIssuedAt        int64     `json:"client_id_issued_at"`
+	LastActivityAt          time.Time `json:"last_activity_at"`
 }
 
 // OAuthAuthorizationCode represents a short-lived authorization code issued during the OAuth flow.

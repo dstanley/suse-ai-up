@@ -7,6 +7,17 @@ set -euo pipefail
 PROXY_URL="${PROXY_URL:-http://localhost:8911}"
 SERVICENOW_MCP_URL="${SERVICENOW_MCP_URL:-http://localhost:8000}"
 DATABRICKS_MCP_URL="${DATABRICKS_MCP_URL:-http://localhost:8001}"
+CURL_INSECURE="${CURL_INSECURE:--k}"
+AUTH_TOKEN="${AUTH_TOKEN:-}"  # Bearer token for OAuth-enabled deployments
+
+# Auto-acquire a token from refresh token if available (exported by demo 02)
+if [ -z "$AUTH_TOKEN" ] && [ -n "${REFRESH_TOKEN:-}" ] && [ -n "${CLIENT_ID:-}" ] && [ -n "${TOKEN_ENDPOINT:-}" ]; then
+  AUTH_TOKEN=$(curl ${CURL_INSECURE} -sf -X POST "${TOKEN_ENDPOINT}" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=refresh_token&refresh_token=${REFRESH_TOKEN}&client_id=${CLIENT_ID}" \
+    | jq -r '.access_token // empty' 2>/dev/null) || true
+  [ -n "$AUTH_TOKEN" ] && echo "Auto-acquired AUTH_TOKEN via refresh token"
+fi
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -25,24 +36,40 @@ echo "ServiceNow MCP: ${SERVICENOW_MCP_URL}"
 echo "Databricks MCP: ${DATABRICKS_MCP_URL}"
 echo ""
 
+# Verify proxy is reachable
+HEALTH_CODE=$(curl ${CURL_INSECURE} -s -o /dev/null -w "%{http_code}" "${PROXY_URL}/health" 2>/dev/null) || true
+if [ "$HEALTH_CODE" = "000" ]; then
+  fail "Cannot connect to proxy at ${PROXY_URL}. Export PROXY_URL to override (e.g. export PROXY_URL=https://proxy.example.com:8911)"
+elif [ "$HEALTH_CODE" != "200" ]; then
+  info "Proxy returned HTTP ${HEALTH_CODE} on /health (may still work)"
+fi
+
 # ─── Step 1: Verify both MCP servers ─────────────────────────────────
 
 step 1 "Verify MCP Servers"
 
-curl -sf "${SERVICENOW_MCP_URL}/health" | jq . || fail "ServiceNow MCP not reachable"
+curl ${CURL_INSECURE} -sf "${SERVICENOW_MCP_URL}/health" | jq . || fail "ServiceNow MCP not reachable"
 ok "ServiceNow MCP server is running"
 
-curl -sf "${DATABRICKS_MCP_URL}/health" | jq . || fail "Databricks MCP not reachable"
+curl ${CURL_INSECURE} -sf "${DATABRICKS_MCP_URL}/health" | jq . || fail "Databricks MCP not reachable"
 ok "Databricks MCP server is running"
 
 # ─── Step 2: Register both adapters ──────────────────────────────────
 
 step 2 "Register Both Adapters"
 
+if [ -n "$AUTH_TOKEN" ]; then
+  AUTH_HEADER="Authorization: Bearer ${AUTH_TOKEN}"
+  info "Using bearer token for authentication"
+else
+  AUTH_HEADER="X-User-ID: admin"
+  info "Using dev-mode auth (set AUTH_TOKEN for OAuth-enabled deployments)"
+fi
+
 info "Registering ServiceNow adapter (service account auth)..."
-curl -sf -X POST "${PROXY_URL}/api/v1/adapters" \
+curl ${CURL_INSECURE} -sf -X POST "${PROXY_URL}/api/v1/adapters" \
   -H "Content-Type: application/json" \
-  -H "X-User-ID: admin" \
+  -H "${AUTH_HEADER}" \
   -d "{
     \"name\": \"servicenow\",
     \"remoteUrl\": \"${SERVICENOW_MCP_URL}/mcp\",
@@ -57,12 +84,12 @@ curl -sf -X POST "${PROXY_URL}/api/v1/adapters" \
         \"impersonation_field\": \"email\"
       }
     }
-  }" 2>/dev/null | jq . || info "ServiceNow adapter may already exist"
+  }" 2>/dev/null | jq . || info "ServiceNow adapter registration skipped (may already exist or requires AUTH_TOKEN)"
 
 info "Registering Databricks adapter (token exchange auth)..."
-curl -sf -X POST "${PROXY_URL}/api/v1/adapters" \
+curl ${CURL_INSECURE} -sf -X POST "${PROXY_URL}/api/v1/adapters" \
   -H "Content-Type: application/json" \
-  -H "X-User-ID: admin" \
+  -H "${AUTH_HEADER}" \
   -d "{
     \"name\": \"databricks\",
     \"remoteUrl\": \"${DATABRICKS_MCP_URL}/mcp\",
@@ -77,9 +104,9 @@ curl -sf -X POST "${PROXY_URL}/api/v1/adapters" \
         \"subject_token_type\": \"urn:ietf:params:oauth:token-type:id_token\"
       }
     }
-  }" 2>/dev/null | jq . || info "Databricks adapter may already exist"
+  }" 2>/dev/null | jq . || info "Databricks adapter registration skipped (may already exist or requires AUTH_TOKEN)"
 
-ok "Both adapters registered"
+ok "Adapter registration complete"
 
 # ─── Step 3: Show the unified endpoint ───────────────────────────────
 
@@ -125,7 +152,7 @@ info "The unified endpoint is protected by the same OAuth middleware"
 info "as all other proxy endpoints."
 echo ""
 
-AS_META=$(curl -sf "${PROXY_URL}/.well-known/oauth-authorization-server") || fail "AS metadata unavailable"
+AS_META=$(curl ${CURL_INSECURE} -sf "${PROXY_URL}/.well-known/oauth-authorization-server") || fail "AS metadata unavailable"
 echo "$AS_META" | jq '{ authorization_endpoint, token_endpoint, registration_endpoint }'
 ok "OAuth endpoints discovered"
 
@@ -136,7 +163,7 @@ step 5 "Unified Endpoint Requires OAuth"
 info "Attempting to call /api/v1/mcp without a bearer token..."
 echo ""
 
-HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "${PROXY_URL}/api/v1/mcp" \
+HTTP_CODE=$(curl ${CURL_INSECURE} -sf -o /dev/null -w "%{http_code}" -X POST "${PROXY_URL}/api/v1/mcp" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' 2>/dev/null || echo "401")
 
@@ -204,5 +231,8 @@ echo "Authentication summary:"
 echo "  Inbound:  OAuth 2.1 + PKCE -> proxy-issued JWT"
 echo "  Outbound: servicenow -> Basic + X-UserToken (impersonation)"
 echo "            databricks -> Bearer <RFC 8693 exchanged token>"
+echo ""
+echo "Cleanup:"
+echo "  docker compose down    # stop and remove the mock servers"
 echo ""
 echo "Next: Run 06-tool-policies for fine-grained access control."

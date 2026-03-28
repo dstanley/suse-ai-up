@@ -5,6 +5,7 @@
 set -euo pipefail
 
 PROXY_URL="${PROXY_URL:-http://localhost:8911}"
+CURL_INSECURE="${CURL_INSECURE:--k}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -57,12 +58,14 @@ step 2 "Mode 1: JWT SVID Token Exchange"
 
 info "In JWT SVID mode, the proxy fetches a JWT from the SPIRE agent"
 info "and uses it as the subject_token in an RFC 8693 token exchange."
-info "This replaces the Rancher ID token for workload-to-workload flows."
+info "This replaces the upstream ID token for workload-to-workload flows."
 echo ""
 
+info "Example adapter configuration:"
+echo ""
 cat <<'JSON'
 {
-  "name": "databricks-spiffe",
+  "name": "databricks_spiffe",
   "remoteUrl": "http://databricks-mcp:8001/mcp",
   "connectionType": "remote-http",
   "authentication": {
@@ -86,9 +89,9 @@ echo ""
 
 cat <<'FLOW'
 Flow:
-  1. User calls databricks-spiffe__execute_sql via the unified endpoint
+  1. User calls databricks_spiffe__execute_sql via the unified endpoint
   2. Proxy validates the user's OAuth token (same as always)
-  3. Instead of using the user's Rancher ID token, the proxy calls:
+  3. Instead of using the user's upstream ID token, the proxy calls:
      SPIRE Agent -> FetchJWTSVID(audience="https://databricks.example.com")
   4. SPIRE returns a JWT SVID signed by the SPIRE server
   5. Proxy exchanges the JWT SVID at Databricks' token endpoint:
@@ -99,14 +102,14 @@ Flow:
   6. Databricks trusts the SPIRE CA and issues a Databricks token
   7. Proxy forwards the request with the Databricks token
 
-Why use this over Rancher ID token exchange?
+Why use this over upstream ID token exchange?
   - Workload identity is independent of user session
   - Trust is based on workload attestation, not user credentials
   - Works for service-to-service flows without a user context
   - SPIRE handles credential rotation automatically
 FLOW
 
-ok "JWT SVID replaces the Rancher ID token as the subject_token"
+ok "JWT SVID replaces the upstream ID token as the subject_token"
 
 # ─── Step 3: mTLS Mode ──────────────────────────────────────────────
 
@@ -116,9 +119,11 @@ info "In mTLS mode, the proxy uses X.509 SVIDs for mutual TLS."
 info "No bearer tokens needed — identity is at the transport layer."
 echo ""
 
+info "Example adapter configuration:"
+echo ""
 cat <<'JSON'
 {
-  "name": "internal-service",
+  "name": "internal_service",
   "remoteUrl": "https://internal-mcp.mesh.local/mcp",
   "connectionType": "remote-http",
   "authentication": {
@@ -231,7 +236,7 @@ cat <<'TABLE'
 +-------------------+------------------+------------------+------------------+
 | Identity basis    | User's IdP token | Shared SA creds  | Workload cert/JWT|
 | Per-user tokens   | Yes              | No (impersonate) | No (workload)    |
-| Credential source | Rancher OIDC     | CSI Secret Store | SPIRE Agent      |
+| Credential source | Upstream OIDC    | CSI Secret Store | SPIRE Agent      |
 | Rotation          | Token expiry     | Manual           | Automatic        |
 | Trust model       | IdP federation   | Shared secret    | PKI/attestation  |
 | Use case          | Cross-IdP access | Legacy systems   | Zero-trust mesh  |

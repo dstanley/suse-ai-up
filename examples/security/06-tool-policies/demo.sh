@@ -4,6 +4,17 @@
 set -euo pipefail
 
 PROXY_URL="${PROXY_URL:-http://localhost:8911}"
+CURL_INSECURE="${CURL_INSECURE:--k}"
+AUTH_TOKEN="${AUTH_TOKEN:-}"  # Bearer token for OAuth-enabled deployments
+
+# Auto-acquire a token from refresh token if available (exported by demo 02)
+if [ -z "$AUTH_TOKEN" ] && [ -n "${REFRESH_TOKEN:-}" ] && [ -n "${CLIENT_ID:-}" ] && [ -n "${TOKEN_ENDPOINT:-}" ]; then
+  AUTH_TOKEN=$(curl ${CURL_INSECURE} -s -X POST "${TOKEN_ENDPOINT}" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=refresh_token&refresh_token=${REFRESH_TOKEN}&client_id=${CLIENT_ID}" \
+    | jq -r '.access_token // empty' 2>/dev/null) || true
+  [ -n "$AUTH_TOKEN" ] && echo "Auto-acquired AUTH_TOKEN via refresh token"
+fi
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -19,6 +30,14 @@ info() { echo -e "${YELLOW}INFO${NC}: $1"; }
 echo -e "${CYAN}Tool-Level Authorization Policies${NC}"
 echo "Proxy: ${PROXY_URL}"
 echo ""
+
+# Verify proxy is reachable
+HEALTH_CODE=$(curl ${CURL_INSECURE} -s -o /dev/null -w "%{http_code}" "${PROXY_URL}/health" 2>/dev/null) || true
+if [ "$HEALTH_CODE" = "000" ]; then
+  fail "Cannot connect to proxy at ${PROXY_URL}. Export PROXY_URL to override (e.g. export PROXY_URL=https://proxy.example.com:8911)"
+elif [ "$HEALTH_CODE" != "200" ]; then
+  info "Proxy returned HTTP ${HEALTH_CODE} on /health (may still work)"
+fi
 
 # ─── Step 1: Explain the policy model ────────────────────────────────
 
@@ -48,6 +67,35 @@ MODEL
 
 ok "Deny-takes-precedence with priority ordering"
 
+# Set up auth header for policy API calls
+if [ -n "$AUTH_TOKEN" ]; then
+  AUTH_HEADER="Authorization: Bearer ${AUTH_TOKEN}"
+else
+  AUTH_HEADER="X-User-ID: admin"
+fi
+
+# Helper: make an API call and handle auth errors
+api_call() {
+  local RESPONSE HTTP_CODE
+  RESPONSE=$(curl ${CURL_INSECURE} -s -w "\n%{http_code}" -X "$1" "${PROXY_URL}$2" \
+    -H "Content-Type: application/json" \
+    -H "${AUTH_HEADER}" \
+    ${3:+-d "$3"} 2>&1) || true
+  HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+  RESPONSE=$(echo "$RESPONSE" | sed '$d')
+
+  if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+    echo -e "${RED}FAIL${NC}: Authentication required (HTTP ${HTTP_CODE}). Run demo 02 first and export AUTH_TOKEN." >&2
+    return 1
+  elif [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+    echo "$RESPONSE"
+    return 0
+  else
+    echo -e "${RED}FAIL${NC}: Request failed (HTTP ${HTTP_CODE}): ${RESPONSE:-no response}" >&2
+    return 1
+  fi
+}
+
 # ─── Step 2: Create restrictive policy ───────────────────────────────
 
 step 2 "Create Policy: Only database-admins Can Use drop_table"
@@ -56,19 +104,17 @@ info "This policy restricts the drop_table tool on the Databricks adapter"
 info "to members of the database-admins group."
 echo ""
 
-POLICY_1=$(curl -sf -X POST "${PROXY_URL}/api/v1/auth/policies" \
-  -H "Content-Type: application/json" \
-  -d '{
+if POLICY_1=$(api_call POST "/api/v1/auth/policies" '{
     "adapter_name": "databricks",
     "tool_name": "drop_table",
     "effect": "allow",
     "allowed_groups": ["database-admins"],
     "priority": 100
-  }' 2>/dev/null) && {
+  }'); then
   echo "$POLICY_1" | jq .
-  POLICY_1_ID=$(echo "$POLICY_1" | jq -r '.policy_id // .PolicyID // .id // empty')
+  POLICY_1_ID=$(echo "$POLICY_1" | jq -r '.policy_id // empty')
   ok "Policy created: ${POLICY_1_ID:-ok}"
-} || info "Policy creation skipped (proxy may not be running with auth)"
+fi
 
 # ─── Step 3: Create deny policy ─────────────────────────────────────
 
@@ -79,18 +125,16 @@ info "Because deny takes precedence, even if an intern is also in"
 info "database-admins, they cannot use these tools."
 echo ""
 
-POLICY_2=$(curl -sf -X POST "${PROXY_URL}/api/v1/auth/policies" \
-  -H "Content-Type: application/json" \
-  -d '{
+if POLICY_2=$(api_call POST "/api/v1/auth/policies" '{
     "adapter_name": "*",
     "tool_name": "drop_*",
     "effect": "deny",
     "denied_groups": ["interns"],
     "priority": 200
-  }' 2>/dev/null) && {
+  }'); then
   echo "$POLICY_2" | jq .
   ok "Deny policy created"
-} || info "Policy creation skipped"
+fi
 
 # ─── Step 4: Create read-only policy ────────────────────────────────
 
@@ -99,41 +143,37 @@ step 4 "Create Policy: Read-Only Group Cannot Modify Incidents"
 info "Deny update_incident and create_incident for the read-only group."
 echo ""
 
-POLICY_3=$(curl -sf -X POST "${PROXY_URL}/api/v1/auth/policies" \
-  -H "Content-Type: application/json" \
-  -d '{
+if POLICY_3=$(api_call POST "/api/v1/auth/policies" '{
     "adapter_name": "servicenow",
     "tool_name": "update_incident",
     "effect": "deny",
     "denied_groups": ["read-only"],
     "priority": 150
-  }' 2>/dev/null) && {
+  }'); then
   echo "$POLICY_3" | jq .
   ok "Read-only deny policy created (update_incident)"
-} || info "Policy creation skipped"
+fi
 
-POLICY_4=$(curl -sf -X POST "${PROXY_URL}/api/v1/auth/policies" \
-  -H "Content-Type: application/json" \
-  -d '{
+if POLICY_4=$(api_call POST "/api/v1/auth/policies" '{
     "adapter_name": "servicenow",
     "tool_name": "create_incident",
     "effect": "deny",
     "denied_groups": ["read-only"],
     "priority": 150
-  }' 2>/dev/null) && {
+  }'); then
   echo "$POLICY_4" | jq .
   ok "Read-only deny policy created (create_incident)"
-} || info "Policy creation skipped"
+fi
 
 # ─── Step 5: List all policies ───────────────────────────────────────
 
 step 5 "List All Policies"
 
-POLICIES=$(curl -sf "${PROXY_URL}/api/v1/auth/policies" 2>/dev/null) && {
+if POLICIES=$(api_call GET "/api/v1/auth/policies"); then
   echo "$POLICIES" | jq .
-  POLICY_COUNT=$(echo "$POLICIES" | jq 'if type == "array" then length else 0 end')
+  POLICY_COUNT=$(echo "$POLICIES" | jq 'if type == "array" then length elif .policies then .policies | length else 0 end')
   ok "${POLICY_COUNT} policies configured"
-} || info "Could not list policies"
+fi
 
 # ─── Step 6: Explain evaluation scenarios ────────────────────────────
 

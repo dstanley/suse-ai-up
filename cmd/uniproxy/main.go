@@ -769,8 +769,8 @@ func RunUniproxy() {
 		oauth.POST("/revoke", oauthServerHandler.Revoke)
 	}
 
-	// Authorization policy admin endpoints
-	authPolicies := r.Group("/api/v1/auth/policies")
+	// Authorization policy admin endpoints (OAuth-protected)
+	authPolicies := r.Group("/api/v1/auth/policies", auth.MCPOAuthMiddleware(tokenManager))
 	{
 		authPolicies.GET("", oauthServerHandler.ListPolicies)
 		authPolicies.POST("", oauthServerHandler.CreatePolicy)
@@ -783,8 +783,8 @@ func RunUniproxy() {
 	v1 := r.Group("/api/v1")
 	logging.ProxyLogger.Info("V1 group created: %v", v1 != nil)
 	{
-		// Discovery routes
-		discovery := v1.Group("/discovery")
+		// Discovery routes (OAuth-protected)
+		discovery := v1.Group("/discovery", auth.MCPOAuthMiddleware(tokenManager))
 		{
 			discovery.POST("/scan", discoveryHandler.ScanForMCPServers)
 			discovery.GET("/scan", discoveryHandler.ListScanJobs)
@@ -864,8 +864,8 @@ func RunUniproxy() {
 		logging.ProxyLogger.Info("Setting up unified MCP endpoint")
 		v1.Any("/mcp", auth.MCPOAuthMiddleware(tokenManager), handlers.InjectOAuthContext, ginToHTTPHandler(unifiedMCPHandler.HandleUnifiedMCP))
 
-		// Registry routes
-		registry := v1.Group("/registry")
+		// Registry routes (OAuth-protected)
+		registry := v1.Group("/registry", auth.MCPOAuthMiddleware(tokenManager))
 		{
 			registry.GET("", ginToHTTPHandler(registryHandler.ListMCPServersFiltered))
 			registry.POST("/upload", registryHandler.UploadRegistryEntry)
@@ -879,8 +879,8 @@ func RunUniproxy() {
 			registry.DELETE("/:id", registryHandler.DeleteMCPServer)
 		}
 
-		// Plugin routes
-		plugins := v1.Group("/plugins")
+		// Plugin routes (OAuth-protected)
+		plugins := v1.Group("/plugins", auth.MCPOAuthMiddleware(tokenManager))
 		{
 			plugins.POST("/register", pluginHandler.RegisterService)
 			plugins.DELETE("/register/:serviceId", pluginHandler.UnregisterService)
@@ -890,55 +890,41 @@ func RunUniproxy() {
 			plugins.GET("/services/:serviceId/health", pluginHandler.GetServiceHealth)
 		}
 
-		// Authentication routes
+		// Authentication routes (login/callback are public, password/logout require auth)
 		authRoutes := v1.Group("/auth")
 		{
 			authRoutes.POST("/login", authHandler.Login)
 			authRoutes.POST("/oauth/login", authHandler.OAuthLogin)
 			authRoutes.POST("/oauth/callback", authHandler.OAuthCallback)
-			authRoutes.PUT("/password", authHandler.ChangePassword)
-			authRoutes.POST("/logout", authHandler.Logout)
+			authRoutes.PUT("/password", auth.MCPOAuthMiddleware(tokenManager), authHandler.ChangePassword)
+			authRoutes.POST("/logout", auth.MCPOAuthMiddleware(tokenManager), authHandler.Logout)
 		}
 
 		// Unauthenticated auth mode endpoint
 		r.GET("/auth/mode", authHandler.GetAuthMode)
 
-		// User/Group management routes (unauthenticated for read operations)
+		// User/Group management routes (all OAuth-protected)
 		logging.ProxyLogger.Info("Registering user/group routes")
-		users := v1.Group("/users")
+		users := v1.Group("/users", auth.MCPOAuthMiddleware(tokenManager))
 		{
 			logging.ProxyLogger.Info("Users group created: %v", users != nil)
-			// Read operations - no auth required
 			users.GET("", ginToHTTPHandler(userGroupHandler.ListUsers))
 			users.GET("/:id", ginToHTTPHandler(userGroupHandler.GetUser))
-
-			// Write operations - require authentication
-			protectedUsers := users.Group("")
-			protectedUsers.Use(auth.UserAuthMiddleware(userAuthService))
-			{
-				protectedUsers.POST("", ginToHTTPHandler(userGroupHandler.HandleUsers))
-				protectedUsers.PUT("/:id", ginToHTTPHandler(userGroupHandler.UpdateUser))
-				protectedUsers.DELETE("/:id", ginToHTTPHandler(userGroupHandler.DeleteUser))
-			}
+			users.POST("", ginToHTTPHandler(userGroupHandler.HandleUsers))
+			users.PUT("/:id", ginToHTTPHandler(userGroupHandler.UpdateUser))
+			users.DELETE("/:id", ginToHTTPHandler(userGroupHandler.DeleteUser))
 		}
 
-		groups := v1.Group("/groups")
+		groups := v1.Group("/groups", auth.MCPOAuthMiddleware(tokenManager))
 		{
-			// Read operations - no auth required
 			groups.GET("", ginToHTTPHandler(userGroupHandler.HandleGroups))
 			groups.GET("/:id", ginToHTTPHandler(userGroupHandler.GetGroup))
 			groups.GET("/:id/adapters", ginToHTTPHandler(userGroupHandler.ListGroupAdapters))
-
-			// Write operations - require authentication
-			protectedGroups := groups.Group("")
-			protectedGroups.Use(auth.UserAuthMiddleware(userAuthService))
-			{
-				protectedGroups.POST("", ginToHTTPHandler(userGroupHandler.HandleGroups))
-				protectedGroups.PUT("/:id", ginToHTTPHandler(userGroupHandler.UpdateGroup))
-				protectedGroups.DELETE("/:id", ginToHTTPHandler(userGroupHandler.DeleteGroup))
-				protectedGroups.POST("/:id/members", ginToHTTPHandler(userGroupHandler.AddUserToGroup))
-				protectedGroups.DELETE("/:id/members/:userId", ginToHTTPHandler(userGroupHandler.RemoveUserFromGroup))
-			}
+			groups.POST("", ginToHTTPHandler(userGroupHandler.HandleGroups))
+			groups.PUT("/:id", ginToHTTPHandler(userGroupHandler.UpdateGroup))
+			groups.DELETE("/:id", ginToHTTPHandler(userGroupHandler.DeleteGroup))
+			groups.POST("/:id/members", ginToHTTPHandler(userGroupHandler.AddUserToGroup))
+			groups.DELETE("/:id/members/:userId", ginToHTTPHandler(userGroupHandler.RemoveUserFromGroup))
 		}
 
 		// Route assignment routes (under registry)

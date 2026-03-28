@@ -76,6 +76,8 @@ auth:
   mode: "local"  # local, github, rancher, dev
   devMode: false  # Enable development mode (bypass auth)
   oauthIssuerUrl: ""  # External URL for OAuth issuer (used in WWW-Authenticate headers, token iss claim)
+  oauthClientTTLDays: 30  # Days of inactivity before client cleanup (0 = no expiry)
+  oauthMaxClients: 1000   # Maximum registered clients (0 = unlimited)
 
   # Local authentication (password-based)
   local:

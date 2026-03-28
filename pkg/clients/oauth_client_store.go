@@ -6,16 +6,21 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"suse-ai-up/pkg/models"
 )
 
 // OAuthClientStore defines the interface for OAuth client registration storage.
+// Implementations can be file-based, database-backed, or use external stores like Redis.
 type OAuthClientStore interface {
 	Create(client models.OAuthRegisteredClient) error
 	Get(clientID string) (*models.OAuthRegisteredClient, error)
 	List() ([]models.OAuthRegisteredClient, error)
 	Delete(clientID string) error
+	Count() (int, error)
+	UpdateActivity(clientID string, at time.Time) error
+	DeleteExpiredBefore(cutoff time.Time) (int, error)
 }
 
 // FileOAuthClientStore implements OAuthClientStore with encrypted file-based persistence.
@@ -91,6 +96,60 @@ func (s *FileOAuthClientStore) Delete(clientID string) error {
 
 	delete(s.clients, clientID)
 	return s.saveToFile()
+}
+
+// Count returns the number of registered clients.
+func (s *FileOAuthClientStore) Count() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.clients), nil
+}
+
+// UpdateActivity updates the last activity timestamp for a client.
+func (s *FileOAuthClientStore) UpdateActivity(clientID string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client, exists := s.clients[clientID]
+	if !exists {
+		return fmt.Errorf("client with ID %s not found", clientID)
+	}
+
+	client.LastActivityAt = at
+	s.clients[clientID] = client
+	return s.saveToFile()
+}
+
+// DeleteExpiredBefore removes all clients whose LastActivityAt is before the cutoff.
+// Clients with a zero LastActivityAt use CreatedAt instead.
+// Returns the number of clients removed.
+func (s *FileOAuthClientStore) DeleteExpiredBefore(cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var expired []string
+	for id, client := range s.clients {
+		activityTime := client.LastActivityAt
+		if activityTime.IsZero() {
+			activityTime = client.CreatedAt
+		}
+		if activityTime.Before(cutoff) {
+			expired = append(expired, id)
+		}
+	}
+
+	if len(expired) == 0 {
+		return 0, nil
+	}
+
+	for _, id := range expired {
+		delete(s.clients, id)
+	}
+
+	if err := s.saveToFile(); err != nil {
+		return 0, err
+	}
+	return len(expired), nil
 }
 
 func (s *FileOAuthClientStore) loadFromFile() error {

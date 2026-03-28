@@ -94,6 +94,13 @@ func (h *OAuthServerHandler) Register(c *gin.Context) {
 			})
 			return
 		}
+		if strings.Contains(err.Error(), "max clients reached") {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":             "too_many_clients",
+				"error_description": "Maximum number of registered clients reached. Try again later.",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":             "server_error",
 			"error_description": "Failed to register client",

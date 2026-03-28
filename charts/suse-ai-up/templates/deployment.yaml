@@ -50,6 +50,10 @@ spec:
             - name: OAUTH_ISSUER_URL
               value: "{{ .Values.auth.oauthIssuerUrl }}"
             {{- end }}
+            - name: OAUTH_CLIENT_TTL_DAYS
+              value: "{{ .Values.auth.oauthClientTTLDays }}"
+            - name: OAUTH_MAX_CLIENTS
+              value: "{{ .Values.auth.oauthMaxClients }}"
 {{- if eq .Values.auth.mode "local" }}
             - name: ADMIN_PASSWORD
               value: "{{ .Values.auth.local.defaultAdminPassword }}"

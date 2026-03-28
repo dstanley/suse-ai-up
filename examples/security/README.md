@@ -6,15 +6,17 @@ End-to-end examples demonstrating the SUSE AI Universal Proxy's OAuth 2.1 authen
 
 - Running `suse-ai-up` proxy (or Docker Compose from the example)
 - `curl` and `jq` installed
-- For examples 03-05: Docker (to run the mock MCP servers)
+- For examples 03-05: Docker Compose (to run the mock MCP servers)
+  - **Docker Desktop** or **Rancher Desktop** (with dockerd/moby backend) both work
+  - Rancher Desktop users: ensure the container runtime is set to `dockerd` in Preferences > Container Engine for `docker compose` compatibility
 
 ## Examples
 
 | # | Directory | What It Demonstrates |
 |---|-----------|---------------------|
 | 01 | [oauth-discovery](01-oauth-discovery/) | RFC 9728 + RFC 8414 metadata discovery, RFC 7591 dynamic client registration |
-| 02 | [pkce-auth-flow](02-pkce-auth-flow/) | Full OAuth 2.1 PKCE (S256) authorization code flow with Rancher OIDC |
-| 03 | [token-exchange](03-token-exchange/) | RFC 8693 token exchange — proxy exchanges Rancher ID token for Databricks token |
+| 02 | [pkce-auth-flow](02-pkce-auth-flow/) | Full OAuth 2.1 PKCE (S256) authorization code flow with upstream OIDC provider |
+| 03 | [token-exchange](03-token-exchange/) | RFC 8693 token exchange — proxy exchanges upstream ID token for downstream service token |
 | 04 | [service-account](04-service-account/) | Service account impersonation — proxy authenticates as SA, impersonates user to ServiceNow |
 | 05 | [unified-oauth](05-unified-oauth/) | Unified `/api/v1/mcp` endpoint with OAuth + both Databricks and ServiceNow adapters |
 | 06 | [tool-policies](06-tool-policies/) | Tool-level authorization policies — deny-takes-precedence, tool filtering, call enforcement |

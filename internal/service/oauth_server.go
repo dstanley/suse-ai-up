@@ -68,6 +68,7 @@ func NewOAuthServerService(
 	// Start background cleanup goroutines
 	go svc.cleanupExpiredCodes()
 	go svc.cleanupExpiredSessions()
+	go svc.cleanupExpiredClients()
 
 	return svc
 }
@@ -85,6 +86,17 @@ func (s *OAuthServerService) RegisterClient(clientName string, redirectURIs []st
 	// Rate limiting
 	if err := s.checkRegistrationRateLimit(sourceIP); err != nil {
 		return nil, err
+	}
+
+	// Max clients cap
+	if s.cfg.OAuthMaxClients > 0 {
+		count, err := s.clientStore.Count()
+		if err != nil {
+			return nil, fmt.Errorf("failed to check client count: %w", err)
+		}
+		if count >= s.cfg.OAuthMaxClients {
+			return nil, fmt.Errorf("max clients reached: registration limit of %d clients exceeded", s.cfg.OAuthMaxClients)
+		}
 	}
 
 	// Validate redirect URIs against allowlist
@@ -117,6 +129,7 @@ func (s *OAuthServerService) RegisterClient(clientName string, redirectURIs []st
 		TokenEndpointAuthMethod: tokenEndpointAuthMethod,
 		CreatedAt:               now,
 		ClientIDIssuedAt:        now.Unix(),
+		LastActivityAt:          now,
 	}
 
 	if err := s.clientStore.Create(client); err != nil {
@@ -387,6 +400,11 @@ func (s *OAuthServerService) issueTokens(clientID, userID string, userClaims map
 
 	expiresIn := int(time.Until(accessExpiresAt).Seconds())
 
+	// Update client activity timestamp for TTL tracking
+	if err := s.clientStore.UpdateActivity(clientID, now); err != nil {
+		fmt.Printf("Warning: Failed to update client activity for %s: %v\n", clientID, err)
+	}
+
 	s.auditLogger.Log(auth.AuditEvent{
 		EventType: auth.AuditEventTokenIssued,
 		UserID:    userID,
@@ -589,6 +607,27 @@ func (s *OAuthServerService) cleanupExpiredSessions() {
 			}
 		}
 		s.sessionsMu.Unlock()
+	}
+}
+
+func (s *OAuthServerService) cleanupExpiredClients() {
+	if s.cfg.OAuthClientTTLDays <= 0 {
+		return // TTL disabled, no cleanup needed
+	}
+
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		cutoff := time.Now().AddDate(0, 0, -s.cfg.OAuthClientTTLDays)
+		removed, err := s.clientStore.DeleteExpiredBefore(cutoff)
+		if err != nil {
+			fmt.Printf("Warning: Failed to cleanup expired OAuth clients: %v\n", err)
+			continue
+		}
+		if removed > 0 {
+			fmt.Printf("OAuth client cleanup: removed %d inactive clients (TTL: %d days)\n", removed, s.cfg.OAuthClientTTLDays)
+		}
 	}
 }
 

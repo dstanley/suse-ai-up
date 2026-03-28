@@ -96,6 +96,12 @@ func (h *UnifiedMCPHandler) accessTokenFromRequest(r *http.Request) string {
 	return ""
 }
 
+// userContextWithScopes creates a copy of the user context with resolved scopes
+// for a specific adapter. Delegates to the shared auth.ResolveUserScopes.
+func (h *UnifiedMCPHandler) userContextWithScopes(uc *auth.UserContext, adapter *models.AdapterResource) *auth.UserContext {
+	return auth.ResolveUserScopes(uc, adapter.Authentication)
+}
+
 // InjectOAuthContext is a Gin middleware adapter that propagates OAuth claims
 // from the Gin context into the request context so that raw http.Handlers
 // (like HandleUnifiedMCP) can access them.
@@ -348,13 +354,16 @@ func (h *UnifiedMCPHandler) handleToolsList(ctx context.Context, req *MCPRequest
 				return
 			}
 
-			// Apply tool-level authorization filtering
+			// Apply tool-level authorization filtering with scope awareness
 			if h.toolAuthService != nil {
+				// Resolve user's scopes for this adapter so policies can check required_scopes
+				scopeAwareCtx := h.userContextWithScopes(reqCtx.userContext, &adapter)
+
 				toolNames := make([]string, len(tools))
 				for i, t := range tools {
 					toolNames[i] = t.Name
 				}
-				allowedNames := h.toolAuthService.FilterToolList(adapter.Name, toolNames, reqCtx.userContext)
+				allowedNames := h.toolAuthService.FilterToolList(adapter.Name, toolNames, scopeAwareCtx)
 				allowedSet := make(map[string]bool, len(allowedNames))
 				for _, n := range allowedNames {
 					allowedSet[n] = true
@@ -425,24 +434,25 @@ func (h *UnifiedMCPHandler) handleToolsCall(ctx context.Context, req *MCPRequest
 	adapterName := parts[0]
 	toolName := parts[1]
 
-	// Enforce tool-level authorization policy
-	if h.toolAuthService != nil {
-		if err := h.toolAuthService.AuthorizeToolCall(adapterName, toolName, reqCtx.userContext); err != nil {
-			return &MCPResponse{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Error:   &MCPRPCError{Code: -32603, Message: err.Error()},
-			}
-		}
-	}
-
-	// Get the adapter
+	// Get the adapter (needed for scope resolution before authorization)
 	adapter, err := h.adapterService.GetAdapter(ctx, reqCtx.userID, adapterName, h.userGroupService)
 	if err != nil {
 		return &MCPResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Error:   &MCPRPCError{Code: -32602, Message: "Adapter not found: " + adapterName},
+		}
+	}
+
+	// Enforce tool-level authorization policy with scope awareness
+	if h.toolAuthService != nil {
+		scopeAwareCtx := h.userContextWithScopes(reqCtx.userContext, adapter)
+		if err := h.toolAuthService.AuthorizeToolCall(adapterName, toolName, scopeAwareCtx); err != nil {
+			return &MCPResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &MCPRPCError{Code: -32603, Message: err.Error()},
+			}
 		}
 	}
 

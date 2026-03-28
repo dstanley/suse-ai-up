@@ -17,11 +17,12 @@ func NewPolicyEngine(policyStore clients.AuthPolicyStore) *PolicyEngine {
 
 // UserContext holds the identity claims for policy evaluation.
 type UserContext struct {
-	UserID   string
-	Username string
-	Email    string
-	Groups   []string
-	Roles    []string
+	UserID         string
+	Username       string
+	Email          string
+	Groups         []string
+	Roles          []string
+	ResolvedScopes []string // Backend scopes resolved from scope policies for the current adapter
 }
 
 // IsToolAllowed evaluates whether a user is authorized to access a specific tool.
@@ -92,7 +93,12 @@ func (pe *PolicyEngine) userMatchesPolicy(policy models.AuthorizationPolicy, use
 
 	// Check allow lists
 	if policy.Effect == "allow" {
-		// Wildcard: empty allowed lists means allow all
+		// Check required scopes first — if specified, user must have ALL of them
+		if len(policy.RequiredScopes) > 0 && !hasAllScopes(user.ResolvedScopes, policy.RequiredScopes) {
+			return false
+		}
+
+		// Wildcard: empty allowed lists means allow all (subject to scope check above)
 		if len(policy.AllowedUsers) == 0 && len(policy.AllowedGroups) == 0 {
 			return true
 		}
@@ -106,6 +112,20 @@ func (pe *PolicyEngine) userMatchesPolicy(policy models.AuthorizationPolicy, use
 	}
 
 	return false
+}
+
+// hasAllScopes checks that userScopes contains every required scope.
+func hasAllScopes(userScopes, requiredScopes []string) bool {
+	scopeSet := make(map[string]struct{}, len(userScopes))
+	for _, s := range userScopes {
+		scopeSet[s] = struct{}{}
+	}
+	for _, req := range requiredScopes {
+		if _, ok := scopeSet[req]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func containsStr(slice []string, s string) bool {

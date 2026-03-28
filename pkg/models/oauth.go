@@ -72,17 +72,18 @@ func (t *TokenVaultEntry) IsExpired() bool {
 
 // AuthorizationPolicy represents an administrator-defined rule for tool-level access control.
 type AuthorizationPolicy struct {
-	PolicyID     string    `json:"policy_id"`
-	AdapterName  string    `json:"adapter_name"`
-	ToolName     string    `json:"tool_name"`
-	AllowedGroups []string `json:"allowed_groups,omitempty"`
-	AllowedUsers  []string `json:"allowed_users,omitempty"`
-	DeniedGroups  []string `json:"denied_groups,omitempty"`
-	DeniedUsers   []string `json:"denied_users,omitempty"`
-	Effect       string    `json:"effect"`
-	Priority     int       `json:"priority"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	PolicyID       string    `json:"policy_id"`
+	AdapterName    string    `json:"adapter_name"`
+	ToolName       string    `json:"tool_name"`
+	AllowedGroups  []string  `json:"allowed_groups,omitempty"`
+	AllowedUsers   []string  `json:"allowed_users,omitempty"`
+	DeniedGroups   []string  `json:"denied_groups,omitempty"`
+	DeniedUsers    []string  `json:"denied_users,omitempty"`
+	RequiredScopes []string  `json:"required_scopes,omitempty"` // User must have ALL of these scopes
+	Effect         string    `json:"effect"`
+	Priority       int       `json:"priority"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // RegistrationRateLimit tracks dynamic client registration rate per source IP.

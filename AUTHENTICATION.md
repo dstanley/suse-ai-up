@@ -870,6 +870,52 @@ In this example:
 
 User groups and roles are sourced from the OIDC claims in the user's authenticated session.
 
+### Scope-Aware Tool Authorization
+
+Authorization policies can use `required_scopes` to control tool access based on a user's resolved backend scopes. This creates a two-tier authorization model:
+
+1. **Scope resolution**: User identity (groups/roles) maps to backend scopes via scope policies
+2. **Tool authorization**: Policies check the user's resolved scopes to determine tool visibility
+
+This means the same OIDC groups that determine backend API permissions also control which MCP tools are visible and callable through the proxy.
+
+#### Example: Restrict Dangerous Tools by Scope
+
+```json
+{
+  "policy_id": "restrict-drop-table",
+  "adapter_name": "databricks",
+  "tool_name": "drop_table",
+  "effect": "allow",
+  "allowed_groups": ["data-engineers"],
+  "required_scopes": ["sql:write"],
+  "priority": 10
+}
+```
+
+This policy only allows `drop_table` for users who are both in the `data-engineers` group AND have the `sql:write` scope resolved from the adapter's scope policies. Users without `sql:write` won't see the tool in `tools/list` and will receive a 403 if they attempt to call it directly.
+
+#### Authorization Policy Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `policy_id` | `string` | Unique identifier for the policy |
+| `adapter_name` | `string` | Target adapter name |
+| `tool_name` | `string` | Target tool name |
+| `effect` | `string` | `"allow"` or `"deny"` |
+| `allowed_groups` | `[]string` | Groups permitted (allow policies) |
+| `allowed_users` | `[]string` | Users permitted (allow policies) |
+| `denied_groups` | `[]string` | Groups denied (deny policies) |
+| `denied_users` | `[]string` | Users denied (deny policies) |
+| `required_scopes` | `[]string` | All listed scopes must be present in user's resolved scopes |
+| `priority` | `int` | Evaluation order (higher first) |
+
+**Evaluation rules:**
+- Deny takes precedence: if any matching deny policy applies, access is denied
+- `required_scopes` on allow policies: user must have ALL listed scopes for the policy to match
+- If no policies match a tool, access defaults to allowed (adapter-level fallback)
+- Tool filtering applies to both the unified MCP endpoint (`/mcp`) and per-adapter REST endpoints (`/adapters/{name}/tools`)
+
 ## Development Mode
 
 When `DEV_MODE=true`, authentication is bypassed and you can use X-User-ID headers:

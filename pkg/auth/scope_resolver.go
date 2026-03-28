@@ -57,6 +57,44 @@ func ResolveScopesString(policies []models.ScopePolicy, user *UserContext, fallb
 	return strings.Join(scopes, " ")
 }
 
+// ResolveUserScopes creates a copy of the user context with backend-specific resolved scopes
+// for a given adapter auth config. This allows tool authorization policies to check
+// required_scopes against the user's backend-specific scopes.
+func ResolveUserScopes(uc *UserContext, authConfig *models.AdapterAuthConfig) *UserContext {
+	scopeCtx := &UserContext{
+		UserID:   uc.UserID,
+		Username: uc.Username,
+		Email:    uc.Email,
+		Groups:   uc.Groups,
+		Roles:    uc.Roles,
+	}
+
+	if authConfig == nil {
+		return scopeCtx
+	}
+
+	if authConfig.TokenExchange != nil && len(authConfig.TokenExchange.ScopePolicies) > 0 {
+		scopeCtx.ResolvedScopes = ResolveScopesForUser(
+			authConfig.TokenExchange.ScopePolicies, uc,
+			authConfig.TokenExchange.Scopes,
+		)
+		return scopeCtx
+	}
+
+	if authConfig.ServiceAccount != nil && len(authConfig.ServiceAccount.ScopePolicies) > 0 {
+		scopeCtx.ResolvedScopes = ResolveScopesForUser(
+			authConfig.ServiceAccount.ScopePolicies, uc, nil,
+		)
+		return scopeCtx
+	}
+
+	if authConfig.TokenExchange != nil {
+		scopeCtx.ResolvedScopes = authConfig.TokenExchange.Scopes
+	}
+
+	return scopeCtx
+}
+
 // scopePolicyMatchesUser checks if a scope policy applies to the given user.
 func scopePolicyMatchesUser(policy models.ScopePolicy, user *UserContext) bool {
 	// Empty groups and users = default policy, matches everyone

@@ -797,60 +797,62 @@ func RunUniproxy() {
 		adapters := v1.Group("/adapters")
 		{
 			logging.ProxyLogger.Info("Adapter handler initialized: %v", adapterHandler != nil)
-			// CRUD operations using AdapterHandler
-			logging.ProxyLogger.Info("Registering adapter GET route")
-			adapters.GET("", ginToHTTPHandler(adapterHandler.ListAdapters))
-			logging.ProxyLogger.Info("Registering adapter POST route")
-			adapters.POST("", ginToHTTPHandler(adapterHandler.CreateAdapter))
-			adapters.GET("/:name", ginToHTTPHandler(adapterHandler.GetAdapter))
-			adapters.PUT("/:name", ginToHTTPHandler(adapterHandler.UpdateAdapter))
-			adapters.DELETE("/:name", ginToHTTPHandler(adapterHandler.DeleteAdapter))
-			adapters.POST("/:name/health", ginToHTTPHandler(adapterHandler.CheckAdapterHealth))
+			// CRUD operations — protected by OAuth
+			adapterAdmin := adapters.Group("", auth.MCPOAuthMiddleware(tokenManager))
+			{
+				adapterAdmin.GET("", ginToHTTPHandler(adapterHandler.ListAdapters))
+				adapterAdmin.POST("", ginToHTTPHandler(adapterHandler.CreateAdapter))
+				adapterAdmin.GET("/:name", ginToHTTPHandler(adapterHandler.GetAdapter))
+				adapterAdmin.PUT("/:name", ginToHTTPHandler(adapterHandler.UpdateAdapter))
+				adapterAdmin.DELETE("/:name", ginToHTTPHandler(adapterHandler.DeleteAdapter))
+				adapterAdmin.POST("/:name/health", ginToHTTPHandler(adapterHandler.CheckAdapterHealth))
 
-			// Group assignments
-			adapters.POST("/:name/groups", ginToHTTPHandler(adapterHandler.AssignAdapterToGroup))
-			adapters.DELETE("/:name/groups/:groupId", ginToHTTPHandler(adapterHandler.RemoveAdapterFromGroup))
-			adapters.GET("/:name/groups", ginToHTTPHandler(adapterHandler.ListAdapterGroupAssignments))
+				// Group assignments
+				adapterAdmin.POST("/:name/groups", ginToHTTPHandler(adapterHandler.AssignAdapterToGroup))
+				adapterAdmin.DELETE("/:name/groups/:groupId", ginToHTTPHandler(adapterHandler.RemoveAdapterFromGroup))
+				adapterAdmin.GET("/:name/groups", ginToHTTPHandler(adapterHandler.ListAdapterGroupAssignments))
 
-			// Token management
-			adapters.GET("/:name/token", tokenHandler.GetAdapterToken)
-			adapters.POST("/:name/token/validate", tokenHandler.ValidateToken)
-			adapters.POST("/:name/token/refresh", tokenHandler.RefreshToken)
+				// Token management
+				adapterAdmin.GET("/:name/token", tokenHandler.GetAdapterToken)
+				adapterAdmin.POST("/:name/token/validate", tokenHandler.ValidateToken)
+				adapterAdmin.POST("/:name/token/refresh", tokenHandler.RefreshToken)
 
-			// User config
-			logging.ProxyLogger.Info("Registering user config route")
-			v1.GET("/user/config", ginToHTTPHandler(adapterHandler.GetClientConfig))
+				// Authentication
+				adapterAdmin.GET("/:name/client-token", mcpAuthHandler.GetClientToken)
+				adapterAdmin.POST("/:name/validate-auth", mcpAuthHandler.ValidateAuthConfig)
+				adapterAdmin.POST("/:name/test-auth", mcpAuthHandler.TestAuthConnection)
 
-			// Authentication
-			adapters.GET("/:name/client-token", mcpAuthHandler.GetClientToken)
-			adapters.POST("/:name/validate-auth", mcpAuthHandler.ValidateAuthConfig)
-			adapters.POST("/:name/test-auth", mcpAuthHandler.TestAuthConnection)
-
-			// Adapter management
-			adapters.GET("/:name/status", func(c *gin.Context) {
-				// Get adapter status
-				c.JSON(http.StatusOK, gin.H{
-					"readyReplicas":     1,
-					"updatedReplicas":   1,
-					"availableReplicas": 1,
-					"image":             "nginx:latest",
-					"replicaStatus":     "Healthy",
+				// Adapter status
+				adapterAdmin.GET("/:name/status", func(c *gin.Context) {
+					c.JSON(http.StatusOK, gin.H{
+						"readyReplicas":     1,
+						"updatedReplicas":   1,
+						"availableReplicas": 1,
+						"image":             "nginx:latest",
+						"replicaStatus":     "Healthy",
+					})
 				})
-			})
 
-			// MCP proxy endpoint - this is the main integration point
-			adapters.Any("/:name/mcp", ginToHTTPHandler(adapterHandler.HandleMCPProtocol))
+				// Sync capabilities
+				adapterAdmin.POST("/:name/sync", ginToHTTPHandler(adapterHandler.SyncAdapterCapabilities))
+			}
 
-			// Sync capabilities
-			adapters.POST("/:name/sync", ginToHTTPHandler(adapterHandler.SyncAdapterCapabilities))
+			// User config (on v1 group, not adapters)
+			v1.GET("/user/config", auth.MCPOAuthMiddleware(tokenManager), ginToHTTPHandler(adapterHandler.GetClientConfig))
 
-			// REST-style MCP endpoints
-			adapters.GET("/:name/tools", adapterMCPHandler.ToolsList)
-			adapters.POST("/:name/tools/:toolName/call", adapterMCPHandler.ToolCall)
-			adapters.GET("/:name/resources", adapterMCPHandler.ResourcesList)
-			adapters.GET("/:name/resources/*uri", adapterMCPHandler.ResourceRead)
-			adapters.GET("/:name/prompts", adapterMCPHandler.PromptsList)
-			adapters.GET("/:name/prompts/:promptName", adapterMCPHandler.PromptGet)
+			// MCP proxy endpoint — protected by OAuth for user identity
+			adapters.Any("/:name/mcp", auth.MCPOAuthMiddleware(tokenManager), ginToHTTPHandler(adapterHandler.HandleMCPProtocol))
+
+			// REST-style MCP endpoints — protected by OAuth for scope-aware tool filtering
+			adapterMCP := adapters.Group("", auth.MCPOAuthMiddleware(tokenManager))
+			{
+				adapterMCP.GET("/:name/tools", adapterMCPHandler.ToolsList)
+				adapterMCP.POST("/:name/tools/:toolName/call", adapterMCPHandler.ToolCall)
+				adapterMCP.GET("/:name/resources", adapterMCPHandler.ResourcesList)
+				adapterMCP.GET("/:name/resources/*uri", adapterMCPHandler.ResourceRead)
+				adapterMCP.GET("/:name/prompts", adapterMCPHandler.PromptsList)
+				adapterMCP.GET("/:name/prompts/:promptName", adapterMCPHandler.PromptGet)
+			}
 		}
 
 		// Unified MCP endpoint - aggregates all adapters into a single MCP interface

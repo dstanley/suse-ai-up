@@ -18,6 +18,7 @@ vendor/
 # Build output
 /bin/
 /dist/
+/uniproxy
 
 # IDE
 .vscode/

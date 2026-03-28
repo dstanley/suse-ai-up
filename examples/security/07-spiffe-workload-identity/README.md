@@ -7,28 +7,179 @@ Demonstrates how the proxy uses SPIFFE workload identity for downstream authenti
 1. JWT SVID mode -- SPIRE-issued JWTs used as the subject token in RFC 8693 token exchange
 2. mTLS mode -- X.509 SVIDs for certificate-based mutual TLS with no bearer tokens
 3. SPIRE Agent Workload API interaction (Unix domain socket)
-4. Per-adapter SPIFFE configuration with graceful degradation
+4. Live cluster verification (pods, health, entries, agents, Tornjak)
 5. Comparison of token exchange, service account, and SPIFFE auth strategies
 
 ## Prerequisites
 
-- A running proxy instance
-- A SPIRE agent running on the node (for full execution)
-- `curl` and `jq`
+- A running Kubernetes cluster (tested on RKE2)
+- `helm`, `kubectl`, `curl`, and `jq`
+- nginx ingress controller (for Tornjak ingress, optional)
 
 ## Quick Start
 
 ```bash
-# Start the SPIRE agent (see https://spiffe.io/docs/latest/try/getting-started/)
-# Enable SPIFFE in the proxy:
-export SPIRE_ENABLED=true
-export SPIRE_AGENT_SOCKET_PATH=/tmp/spire-agent/public/api.sock
+# 1. Copy and edit environment variables
+cp .env.example .env
+# Edit .env with your cluster name, trust domain, etc.
 
-# Run the demo
+# 2. Install SPIRE (one-time setup)
+source .env
+./setup.sh
+
+# 3. Start the mock server for end-to-end token exchange
+docker compose up -d
+# Or without Docker: python3 mock-server/server.py &
+
+# 4. Run the demo (architecture walkthrough + live token exchange)
 ./demo.sh
 ```
 
-There is no `docker-compose.yml` for this example. The script describes the SPIFFE architecture and checks for a local SPIRE agent. Full execution requires a running SPIRE agent.
+`setup.sh` installs SPIRE via Helm and registers the proxy workload. `demo.sh` explains the architecture, verifies the live cluster, and performs a full end-to-end SPIFFE token exchange against the mock server.
+
+## Installing SPIRE (Manual Steps)
+
+If you prefer to install manually instead of using `setup.sh`:
+
+### 1. Add Helm repo
+
+```bash
+helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/
+helm repo update
+```
+
+### 2. Install CRDs first (required)
+
+The SPIFFE chart requires CRDs to be installed separately before the main chart:
+
+```bash
+kubectl create namespace spire-system
+helm install spire-crds spiffe/spire-crds --namespace spire-system
+```
+
+### 3. Install SPIRE server and agent
+
+```bash
+helm install spire spiffe/spire --namespace spire-system \
+  --set global.spire.clusterName=marv \
+  --set global.spire.trustDomain=marv.suse-ai.com
+```
+
+**Cluster name** is an arbitrary label used to identify the cluster in multi-cluster federation.
+
+**Trust domain** is the root of all SPIFFE IDs (e.g. `spiffe://marv.suse-ai.com/suse-ai-up`). Choose carefully -- it's permanent for the SPIRE installation and should be unique per trust boundary.
+
+### 4. Verify pods are running
+
+```bash
+kubectl -n spire-system get pods
+# Expected:
+#   spire-server-0                                 2/2  Running
+#   spire-agent-xxxxx                              1/1  Running  (one per node)
+#   spire-spiffe-csi-driver-xxxxx                  2/2  Running
+#   spire-spiffe-oidc-discovery-provider-xxxxx     2/2  Running
+```
+
+### 5. Register the proxy workload
+
+```bash
+kubectl -n spire-system exec -it spire-server-0 -c spire-server -- \
+  /opt/spire/bin/spire-server entry create \
+  -spiffeID spiffe://marv.suse-ai.com/suse-ai-up \
+  -parentID spiffe://marv.suse-ai.com/agent \
+  -selector k8s:namespace:suse-ai-up \
+  -selector k8s:sa:suse-ai-up-proxy-sa
+```
+
+### 6. Enable SPIFFE in the proxy
+
+```bash
+helm upgrade suse-ai-up ./charts/suse-ai-up --reuse-values \
+  --set spiffe.enabled=true
+```
+
+This mounts the SPIRE agent socket into the proxy pod and sets the required environment variables automatically.
+
+## Mock Server (End-to-End Demo)
+
+The mock server provides a complete token exchange and MCP endpoint for demonstrating the full SPIFFE flow without external dependencies. No Python packages required -- uses only the standard library.
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/token` | POST | RFC 8693 token exchange (accepts JWT SVID, returns bearer token) |
+| `/mcp` | POST | Mock MCP server (tools/list, tools/call -- requires exchanged bearer token) |
+
+### Running the Mock Server
+
+With Docker:
+
+```bash
+docker compose up -d
+```
+
+Without Docker:
+
+```bash
+python3 mock-server/server.py &
+```
+
+The server listens on port 8002 by default. Set `MOCK_SERVER_URL` to override.
+
+### Demo Flow
+
+When the mock server is running, `demo.sh` performs the full round-trip:
+
+1. **Mint JWT SVID** -- SPIRE server issues a JWT signed by the trust domain CA
+2. **Token exchange** -- POST the JWT SVID to `/token` as an RFC 8693 `subject_token`
+3. **Receive bearer token** -- Mock server validates the SVID and issues a bearer token
+4. **MCP tool calls** -- POST JSON-RPC requests to `/mcp` with the bearer token
+5. **Verify identity** -- Tool results include `authenticated_via` and `workload_identity` fields
+
+The mock MCP server exposes three tools: `get_cluster_status`, `execute_sql`, and `get_workspace_info`.
+
+## Tornjak Web UI (Optional)
+
+Tornjak provides a web dashboard for managing SPIRE entries, agents, and trust domains.
+
+### Enabling Tornjak
+
+Both the frontend and backend must be enabled separately:
+
+```bash
+helm upgrade spire spiffe/spire --namespace spire-system --reuse-values \
+  --set tornjak-frontend.enabled=true \
+  --set spire-server.tornjak.enabled=true \
+  --set "tornjak-frontend.apiServerURL=http://localhost:10000"
+```
+
+Or with `setup.sh`:
+
+```bash
+ENABLE_TORNJAK=true ./setup.sh
+```
+
+### Accessing Tornjak
+
+Port-forward both the backend API and frontend in separate terminals:
+
+```bash
+# Terminal 1: Tornjak backend API
+kubectl -n spire-system port-forward svc/spire-tornjak-backend 10000:10000
+
+# Terminal 2: Tornjak frontend
+kubectl -n spire-system port-forward svc/spire-tornjak-frontend 3500:3000
+```
+
+Then open `http://localhost:3500`.
+
+### Tornjak Troubleshooting
+
+- **"Invalid origin" error**: Newer versions of the `serve` static server reject requests where the `Host` header doesn't match. Use port-forward (above) rather than ingress to avoid this.
+- **Frontend prompting for API URL**: The Tornjak backend wasn't enabled. Make sure both `tornjak-frontend.enabled=true` and `spire-server.tornjak.enabled=true` are set.
+- **Port 3000 conflict**: Use a different local port for the frontend, e.g. `port-forward svc/spire-tornjak-frontend 3500:3000`.
 
 ## How It Works
 
@@ -52,10 +203,41 @@ SPIFFE provides cryptographic workload identity without static secrets. The prox
 
 ## Environment Variables
 
+### demo.sh
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROXY_URL` | `http://localhost:8911` | Proxy base URL |
-| `SPIRE_ENABLED` | `false` | Enable the SPIFFE client in the proxy |
-| `SPIRE_AGENT_SOCKET_PATH` | `/tmp/spire-agent/public/api.sock` | Path to the SPIRE agent Workload API socket |
-| `SPIFFE_DEFAULT_AUDIENCE` | *(none)* | Default audience for JWT SVIDs when not set per-adapter |
 | `CURL_INSECURE` | `-k` | Set to empty string to enforce TLS verification |
+| `SPIRE_NAMESPACE` | `spire-system` | Namespace where SPIRE is installed |
+| `SPIRE_SERVER_POD` | `spire-server-0` | SPIRE server pod name |
+| `MOCK_SERVER_URL` | `http://localhost:8002` | Mock token exchange + MCP server URL |
+
+### setup.sh
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPIRE_NAMESPACE` | `spire-system` | Namespace for SPIRE installation |
+| `SPIRE_CLUSTER_NAME` | `marv` | Cluster name for SPIRE (arbitrary label) |
+| `SPIRE_TRUST_DOMAIN` | `marv.suse-ai.com` | Trust domain for SPIFFE IDs (permanent) |
+| `SPIRE_SERVER_POD` | `spire-server-0` | SPIRE server pod name |
+| `PROXY_NAMESPACE` | `suse-ai-up` | Namespace where the proxy runs |
+| `PROXY_SERVICE_ACCOUNT` | `suse-ai-up-proxy-sa` | Proxy service account name |
+| `ENABLE_TORNJAK` | `false` | Set to `true` to install Tornjak UI |
+
+### Set automatically by Helm when `spiffe.enabled=true`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPIRE_ENABLED` | `false` | Enable the SPIFFE client in the proxy |
+| `SPIRE_AGENT_SOCKET_PATH` | `/run/spire/sockets/agent.sock` | Path to the SPIRE agent Workload API socket |
+| `SPIFFE_DEFAULT_AUDIENCE` | *(none)* | Default audience for JWT SVIDs when not set per-adapter |
+
+## Proxy Helm Values
+
+```yaml
+spiffe:
+  enabled: true
+  agentSocketPath: "/run/spire/sockets/agent.sock"
+  defaultAudience: "https://example.com"  # optional
+```

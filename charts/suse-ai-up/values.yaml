@@ -295,6 +295,12 @@ quotas:
     cpu: "2"
     memory: "4Gi"
 
+# SPIFFE/SPIRE Configuration
+spiffe:
+  enabled: false
+  agentSocketPath: "/run/spire/sockets/agent.sock"  # Path to SPIRE agent Workload API socket
+  defaultAudience: ""  # Default audience for JWT SVIDs when not specified per-adapter
+
 # Custom environment variables
 extraEnvVars: []
 

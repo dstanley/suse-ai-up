@@ -94,6 +94,17 @@ spec:
             - name: RANCHER_FALLBACK_LOCAL
               value: "{{ .Values.auth.rancher.fallbackLocal }}"
 {{- end }}
+            # SPIFFE/SPIRE Configuration
+            {{- if .Values.spiffe.enabled }}
+            - name: SPIRE_ENABLED
+              value: "true"
+            - name: SPIRE_AGENT_SOCKET_PATH
+              value: "{{ default "/run/spire/sockets/agent.sock" .Values.spiffe.agentSocketPath }}"
+            {{- if .Values.spiffe.defaultAudience }}
+            - name: SPIFFE_DEFAULT_AUDIENCE
+              value: "{{ .Values.spiffe.defaultAudience }}"
+            {{- end }}
+            {{- end }}
             # Initial Users and Groups Configuration
             - name: CREATE_INITIAL_USERS
               value: "{{ .Values.initialUsers.enabled }}"
@@ -126,7 +137,12 @@ spec:
             - name: docs-config
               mountPath: /home/mcpuser/docs
               readOnly: true
-            
+            {{- if .Values.spiffe.enabled }}
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+            {{- end }}
+
           resources:
             {{- toYaml .Values.services.proxy.resources | nindent 12 }}
       volumes:
@@ -143,7 +159,13 @@ spec:
         - name: docs-config
           configMap:
             name: {{ include "suse-ai-up.fullname" . }}-docs
-        
+        {{- if .Values.spiffe.enabled }}
+        - name: spire-agent-socket
+          hostPath:
+            path: {{ dir (default "/run/spire/sockets/agent.sock" .Values.spiffe.agentSocketPath) }}
+            type: DirectoryOrCreate
+        {{- end }}
+
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

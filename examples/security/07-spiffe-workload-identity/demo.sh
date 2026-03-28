@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# 07 — SPIFFE/SPIRE Workload Identity
-# Demonstrates JWT SVID token exchange and mTLS modes.
-# Note: Full execution requires a running SPIRE agent.
+# 07 — SPIFFE/SPIRE Workload Identity Demo
+# Demonstrates JWT SVID token exchange, mTLS modes, and live cluster verification.
+# Run setup.sh first to install SPIRE.
 set -euo pipefail
 
 PROXY_URL="${PROXY_URL:-http://localhost:8911}"
 CURL_INSECURE="${CURL_INSECURE:--k}"
+SPIRE_NAMESPACE="${SPIRE_NAMESPACE:-spire-system}"
+SPIRE_SERVER_POD="${SPIRE_SERVER_POD:-spire-server-0}"
+MOCK_SERVER_URL="${MOCK_SERVER_URL:-http://localhost:8002}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,9 +25,7 @@ echo -e "${CYAN}SPIFFE/SPIRE Workload Identity${NC}"
 echo "Proxy: ${PROXY_URL}"
 echo ""
 
-info "This example describes the SPIFFE integration architecture."
-info "Full execution requires a SPIRE agent running on the node."
-info "Enable with: SPIRE_ENABLED=true SPIRE_AGENT_SOCKET_PATH=/tmp/spire-agent/public/api.sock"
+info "Run setup.sh first if SPIRE is not yet installed."
 echo ""
 
 # ─── Step 1: SPIFFE Overview ─────────────────────────────────────────
@@ -162,12 +163,12 @@ FLOW
 
 ok "Certificate-based identity — no tokens to manage or leak"
 
-# ─── Step 4: SPIRE Agent interaction ─────────────────────────────────
+# ─── Step 4: SPIRE Agent Workload API ─────────────────────────────
 
 step 4 "SPIRE Agent Workload API"
 
 info "The proxy communicates with the SPIRE agent via a Unix domain socket."
-info "Default path: /tmp/spire-agent/public/api.sock"
+info "Default path: /run/spire/sockets/agent.sock"
 echo ""
 
 cat <<'API'
@@ -190,45 +191,293 @@ Proxy <-> SPIRE Agent communication:
 API
 
 echo ""
-info "Checking if SPIRE agent is available..."
 
-SPIRE_SOCKET="${SPIRE_AGENT_SOCKET_PATH:-/tmp/spire-agent/public/api.sock}"
-if [ -S "$SPIRE_SOCKET" ]; then
-  ok "SPIRE agent socket found at ${SPIRE_SOCKET}"
+# ─── Step 5: Live Cluster Verification ─────────────────────────────
+
+step 5 "Live Cluster Verification"
+
+if ! command -v kubectl &>/dev/null; then
+  info "kubectl not found — skipping live verification"
 else
-  info "SPIRE agent not available at ${SPIRE_SOCKET}"
-  info "To set up SPIRE, see: https://spiffe.io/docs/latest/try/getting-started/"
+  info "Checking SPIRE pods in ${SPIRE_NAMESPACE}..."
+  echo ""
+  PODS=$(kubectl -n "${SPIRE_NAMESPACE}" get pods --no-headers 2>/dev/null) || true
+  if [ -z "$PODS" ]; then
+    info "No SPIRE pods found in namespace ${SPIRE_NAMESPACE}"
+    info "Run setup.sh first to install SPIRE"
+  else
+    echo "$PODS"
+    echo ""
+    ok "SPIRE pods found"
+
+    # Check SPIRE server health
+    info "Checking SPIRE server health..."
+    HEALTH=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server healthcheck 2>/dev/null) || true
+    if echo "$HEALTH" | grep -qi "healthy"; then
+      ok "SPIRE server is healthy"
+    else
+      info "SPIRE server health: ${HEALTH:-unknown}"
+    fi
+
+    # Count registered entries
+    info "Querying registered workload entries..."
+    ENTRY_COUNT=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server entry count 2>/dev/null) || true
+    if [ -n "$ENTRY_COUNT" ]; then
+      echo "  $ENTRY_COUNT"
+      ok "Workload entries registered"
+    fi
+
+    # List agents
+    info "Listing SPIRE agents..."
+    AGENTS=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server agent list 2>/dev/null) || true
+    if [ -n "$AGENTS" ]; then
+      echo "$AGENTS" | head -10
+      ok "SPIRE agents connected"
+    else
+      info "No agents found"
+    fi
+
+    # Check if proxy workload is registered
+    info "Checking for proxy workload registration..."
+    PROXY_ENTRY=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server entry show -selector k8s:namespace:suse-ai-up 2>/dev/null) || true
+    if echo "$PROXY_ENTRY" | grep -q "Found 0 entries"; then
+      info "Proxy workload not yet registered. Run setup.sh to register."
+    elif echo "$PROXY_ENTRY" | grep -q "Entry ID"; then
+      echo "$PROXY_ENTRY" | head -10
+      ok "Proxy workload is registered with SPIRE"
+    else
+      info "Could not check proxy registration: ${PROXY_ENTRY:-no response}"
+    fi
+
+    # Check Tornjak backend if available
+    TORNJAK_SVC=$(kubectl -n "${SPIRE_NAMESPACE}" get svc spire-tornjak-backend --no-headers 2>/dev/null) || true
+    if [ -n "$TORNJAK_SVC" ]; then
+      echo ""
+      info "Tornjak backend service detected"
+      TORNJAK_API=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c tornjak -- \
+        wget -q -O - http://localhost:10000/api/tornjak/serverinfo 2>/dev/null) || true
+      if [ -n "$TORNJAK_API" ]; then
+        echo "$TORNJAK_API" | jq . 2>/dev/null || echo "$TORNJAK_API"
+        ok "Tornjak API is responding"
+      else
+        info "Tornjak API not reachable (may still be starting)"
+      fi
+    fi
+  fi
 fi
 
-# ─── Step 5: Configuration ──────────────────────────────────────────
+# ─── Step 6: Mint and Inspect a JWT SVID ───────────────────────────
 
-step 5 "Proxy Configuration"
+step 6 "Mint a JWT SVID"
 
-cat <<'CONFIG'
-Environment variables for SPIFFE support:
+if ! command -v kubectl &>/dev/null; then
+  info "kubectl not found — skipping"
+else
+  PODS=$(kubectl -n "${SPIRE_NAMESPACE}" get pods --no-headers 2>/dev/null) || true
+  if [ -z "$PODS" ]; then
+    info "SPIRE not running — skipping"
+  else
+    TEST_AUDIENCE="https://databricks.example.com"
+    SPIFFE_ID="spiffe://$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server entry show -selector k8s:namespace:suse-ai-up 2>/dev/null \
+      | grep "SPIFFE ID" | head -1 | awk '{print $NF}' | sed 's|spiffe://||')"
 
-  SPIRE_ENABLED=true
-    Enables the SPIFFE client in the proxy.
-    When false (default), SPIFFE adapters will fail gracefully.
+    if [ "$SPIFFE_ID" = "spiffe://" ]; then
+      SPIFFE_ID="spiffe://marv.suse-ai.com/suse-ai-up"
+      info "Using default SPIFFE ID: ${SPIFFE_ID}"
+    fi
 
-  SPIRE_AGENT_SOCKET_PATH=/tmp/spire-agent/public/api.sock
-    Path to the SPIRE agent's Workload API socket.
-    In Kubernetes, this is typically mounted from the host.
+    info "Minting a JWT SVID for audience: ${TEST_AUDIENCE}"
+    info "SPIFFE ID: ${SPIFFE_ID}"
+    echo ""
 
-  SPIFFE_DEFAULT_AUDIENCE=https://example.com
-    Default audience for JWT SVIDs when not specified per-adapter.
+    JWT_SVID=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server jwt mint \
+      -spiffeID "${SPIFFE_ID}" \
+      -audience "${TEST_AUDIENCE}" 2>/dev/null) || true
 
-The proxy initializes the SPIFFE client at startup:
-  - If SPIRE agent is unreachable, logs a warning and continues
-  - SPIFFE adapters will return errors, other auth types work normally
-  - When the agent becomes available, SVIDs are fetched on demand
-CONFIG
+    if [ -n "$JWT_SVID" ]; then
+      # Show truncated token
+      TOKEN_LEN=${#JWT_SVID}
+      echo "  JWT SVID (${TOKEN_LEN} chars): ${JWT_SVID:0:80}..."
+      echo ""
 
-ok "SPIFFE is opt-in per adapter, graceful degradation when unavailable"
+      # Decode and display claims
+      PAYLOAD=$(echo "$JWT_SVID" | cut -d. -f2 | tr '_-' '/+' | \
+        awk '{while(length($0)%4)$0=$0"=";print}' | base64 -D 2>/dev/null || \
+        echo "$JWT_SVID" | cut -d. -f2 | tr '_-' '/+' | \
+        awk '{while(length($0)%4)$0=$0"=";print}' | base64 -d 2>/dev/null) || true
 
-# ─── Step 6: Comparison of auth strategies ───────────────────────────
+      if [ -n "$PAYLOAD" ]; then
+        info "Decoded JWT SVID claims:"
+        echo "$PAYLOAD" | jq . 2>/dev/null || echo "  $PAYLOAD"
+        echo ""
 
-step 6 "Auth Strategy Comparison"
+        ISS=$(echo "$PAYLOAD" | jq -r '.iss // empty' 2>/dev/null)
+        SUB=$(echo "$PAYLOAD" | jq -r '.sub // empty' 2>/dev/null)
+        AUD=$(echo "$PAYLOAD" | jq -r '.aud[0] // empty' 2>/dev/null)
+        EXP=$(echo "$PAYLOAD" | jq -r '.exp // empty' 2>/dev/null)
+
+        ok "Issuer:   ${ISS}"
+        ok "Subject:  ${SUB}"
+        ok "Audience: ${AUD}"
+        if [ -n "$EXP" ]; then
+          EXPIRY=$(date -r "$EXP" 2>/dev/null || date -d "@$EXP" 2>/dev/null || echo "$EXP")
+          ok "Expires:  ${EXPIRY}"
+        fi
+      fi
+
+      ok "JWT SVID minted successfully"
+    else
+      info "Could not mint JWT SVID. Is the proxy workload registered?"
+      info "Run setup.sh to register it."
+    fi
+  fi
+fi
+
+# ─── Step 7: Token Exchange with Mock Server ─────────────────────
+
+step 7 "RFC 8693 Token Exchange"
+
+# Check if mock server is running
+MOCK_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "${MOCK_SERVER_URL}/health" 2>/dev/null) || true
+
+if [ "$MOCK_HEALTH" != "200" ]; then
+  info "Mock server not running at ${MOCK_SERVER_URL}"
+  info "Start it with: docker compose up -d (from this directory)"
+  info "Or:            python3 mock-server/server.py &"
+  echo ""
+  info "Skipping live token exchange — showing what would happen:"
+  echo ""
+  echo "  1. POST ${MOCK_SERVER_URL}/token"
+  echo "     grant_type=urn:ietf:params:oauth:token-type:token-exchange"
+  echo "     subject_token=<jwt-svid>"
+  echo "     subject_token_type=urn:ietf:params:oauth:token-type:jwt"
+  echo "     audience=https://databricks.example.com"
+  echo ""
+  echo "  2. Receive bearer token from token exchange"
+  echo ""
+  echo "  3. POST ${MOCK_SERVER_URL}/mcp"
+  echo "     Authorization: Bearer <exchanged-token>"
+  echo "     {\"jsonrpc\": \"2.0\", \"method\": \"tools/call\", ...}"
+  echo ""
+  info "Set MOCK_SERVER_URL to override (default: http://localhost:8002)"
+else
+  ok "Mock server is running at ${MOCK_SERVER_URL}"
+  echo ""
+
+  # Use the minted JWT SVID if available, otherwise create a synthetic one
+  if [ -z "${JWT_SVID:-}" ]; then
+    info "No live JWT SVID available — creating a synthetic one for demo"
+    # Create a minimal JWT with SPIFFE claims (header.payload.signature)
+    JWT_HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64 | tr -d '=' | tr '/+' '_-')
+    JWT_CLAIMS=$(echo -n "{\"sub\":\"spiffe://marv.suse-ai.com/suse-ai-up\",\"aud\":[\"https://databricks.example.com\"],\"iss\":\"spire-server\",\"exp\":$(($(date +%s) + 3600))}" | base64 | tr -d '=' | tr '/+' '_-')
+    JWT_SVID="${JWT_HEADER}.${JWT_CLAIMS}.mock-signature"
+    info "Synthetic SPIFFE ID: spiffe://marv.suse-ai.com/suse-ai-up"
+  fi
+
+  # ── Step 7a: Exchange JWT SVID for bearer token ──
+  info "Exchanging JWT SVID at mock token endpoint..."
+  echo ""
+  echo "  POST ${MOCK_SERVER_URL}/token"
+  echo "  grant_type=urn:ietf:params:oauth:token-type:token-exchange"
+  echo "  subject_token=<jwt-svid> (${#JWT_SVID} chars)"
+  echo "  subject_token_type=urn:ietf:params:oauth:token-type:jwt"
+  echo ""
+
+  TOKEN_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=urn:ietf:params:oauth:token-type:token-exchange&subject_token=${JWT_SVID}&subject_token_type=urn:ietf:params:oauth:token-type:jwt&audience=https://databricks.example.com&scope=sql:read" 2>&1) || true
+
+  if echo "$TOKEN_RESPONSE" | jq -e '.access_token' &>/dev/null; then
+    BEARER_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
+    TOKEN_TYPE=$(echo "$TOKEN_RESPONSE" | jq -r '.token_type')
+    EXPIRES_IN=$(echo "$TOKEN_RESPONSE" | jq -r '.expires_in')
+    ISSUED_TYPE=$(echo "$TOKEN_RESPONSE" | jq -r '.issued_token_type')
+
+    info "Token exchange response:"
+    echo "$TOKEN_RESPONSE" | jq .
+    echo ""
+    ok "Received ${TOKEN_TYPE} token (expires in ${EXPIRES_IN}s)"
+    ok "Issued token type: ${ISSUED_TYPE}"
+  else
+    echo -e "${RED}FAIL${NC}: Token exchange failed: ${TOKEN_RESPONSE:-no response}" >&2
+    BEARER_TOKEN=""
+  fi
+fi
+
+# ─── Step 8: Call Mock MCP Server ────────────────────────────────
+
+step 8 "MCP Tool Call with Exchanged Token"
+
+if [ -z "${BEARER_TOKEN:-}" ]; then
+  info "No bearer token available — skipping MCP call"
+  info "Run with mock server to see the full flow"
+else
+  # ── 8a: List available tools ──
+  info "Listing available MCP tools..."
+  echo ""
+
+  TOOLS_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/mcp" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${BEARER_TOKEN}" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>&1) || true
+
+  if echo "$TOOLS_RESPONSE" | jq -e '.result.tools' &>/dev/null; then
+    TOOL_COUNT=$(echo "$TOOLS_RESPONSE" | jq '.result.tools | length')
+    echo "$TOOLS_RESPONSE" | jq '.result.tools[] | {name, description}'
+    echo ""
+    ok "${TOOL_COUNT} tools available via SPIFFE-authenticated connection"
+  fi
+
+  # ── 8b: Execute a SQL query ──
+  echo ""
+  info "Calling execute_sql tool via MCP..."
+  echo ""
+
+  SQL_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/mcp" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${BEARER_TOKEN}" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute_sql","arguments":{"query":"SELECT * FROM sensor_data LIMIT 3"}}}' 2>&1) || true
+
+  if echo "$SQL_RESPONSE" | jq -e '.result.content[0].text' &>/dev/null; then
+    RESULT_TEXT=$(echo "$SQL_RESPONSE" | jq -r '.result.content[0].text')
+    echo "$RESULT_TEXT" | jq .
+    echo ""
+
+    AUTH_VIA=$(echo "$RESULT_TEXT" | jq -r '.authenticated_via // empty')
+    WORKLOAD_ID=$(echo "$RESULT_TEXT" | jq -r '.workload_identity // empty')
+    ok "Query executed successfully"
+    ok "Authenticated via: ${AUTH_VIA}"
+    ok "Workload identity: ${WORKLOAD_ID}"
+  else
+    echo -e "${RED}FAIL${NC}: MCP call failed: ${SQL_RESPONSE:-no response}" >&2
+  fi
+
+  # ── 8c: Get workspace info ──
+  echo ""
+  info "Calling get_workspace_info tool..."
+  echo ""
+
+  WS_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/mcp" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${BEARER_TOKEN}" \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_workspace_info","arguments":{}}}' 2>&1) || true
+
+  if echo "$WS_RESPONSE" | jq -e '.result.content[0].text' &>/dev/null; then
+    echo "$WS_RESPONSE" | jq -r '.result.content[0].text' | jq .
+    echo ""
+    ok "Workspace info retrieved with workload identity"
+  fi
+fi
+
+# ─── Step 9: Auth Strategy Comparison ─────────────────────────────
+
+step 9 "Auth Strategy Comparison"
 
 cat <<'TABLE'
 +-------------------+------------------+------------------+------------------+
@@ -255,8 +504,14 @@ echo "What we demonstrated:"
 echo "  1. JWT SVID mode — workload identity for token exchange"
 echo "  2. mTLS mode — certificate-based transport authentication"
 echo "  3. SPIRE Agent Workload API interaction"
-echo "  4. Configuration and graceful degradation"
-echo "  5. Comparison of all three auth strategies"
+echo "  4. Live cluster verification (pods, health, entries, agents)"
+echo "  5. JWT SVID minting from SPIRE server"
+echo "  6. RFC 8693 token exchange (JWT SVID -> bearer token)"
+echo "  7. MCP tool calls authenticated via exchanged workload token"
+echo "  8. Comparison of all three auth strategies"
+echo ""
+echo "End-to-end flow:"
+echo "  SPIRE Agent -> JWT SVID -> Token Exchange -> Bearer Token -> MCP Server"
 echo ""
 echo "SPIFFE is best suited for:"
 echo "  - Zero-trust service mesh environments"

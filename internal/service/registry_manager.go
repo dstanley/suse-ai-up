@@ -204,7 +204,11 @@ func (rm *RegistryManager) LoadFromCustomSource(sourceConfig models.RegistrySour
 		data, err = rm.loadFromFile(u.Path)
 	case "http", "https":
 		// Pass the token to loadFromHTTP
-		data, err = rm.loadFromHTTP(sourceConfig.URL, authToken, sourceConfig.Auth.Type)
+		authType := ""
+		if sourceConfig.Auth != nil {
+			authType = sourceConfig.Auth.Type
+		}
+		data, err = rm.loadFromHTTP(sourceConfig.URL, authToken, authType)
 	default:
 		return fmt.Errorf("unsupported source scheme: %s", u.Scheme)
 	}

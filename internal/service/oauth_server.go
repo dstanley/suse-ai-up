@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -57,7 +58,7 @@ func NewOAuthServerService(
 		clientStore:  clientStore,
 		auditLogger:  auditLogger,
 		cfg:          cfg,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		httpClient: newHTTPClient(cfg),
 		codes:        make(map[string]*models.OAuthAuthorizationCode),
 		rateLimits:   make(map[string]*models.RegistrationRateLimit),
 		sessions:     make(map[string]*models.OAuthSession),
@@ -69,6 +70,14 @@ func NewOAuthServerService(
 	go svc.cleanupExpiredSessions()
 
 	return svc
+}
+
+func newHTTPClient(cfg *config.Config) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg.RancherTLSSkipVerify {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // configurable for self-signed certs
+	}
+	return &http.Client{Timeout: 10 * time.Second, Transport: transport}
 }
 
 // RegisterClient handles dynamic client registration (RFC 7591).
@@ -295,6 +304,20 @@ func (s *OAuthServerService) GetSessionByAccessToken(accessToken string) (*model
 	return nil, fmt.Errorf("session not found for token")
 }
 
+// GetSessionsByUserID returns all active sessions for a given user ID.
+func (s *OAuthServerService) GetSessionsByUserID(userID string) []*models.OAuthSession {
+	s.sessionsMu.RLock()
+	defer s.sessionsMu.RUnlock()
+
+	var result []*models.OAuthSession
+	for _, session := range s.sessions {
+		if session.UserID == userID {
+			result = append(result, session)
+		}
+	}
+	return result
+}
+
 // TokenResponse represents the OAuth token endpoint response.
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -434,15 +457,18 @@ func (s *OAuthServerService) isRedirectURIAllowed(uri string) bool {
 
 // ExchangeRancherCode exchanges a Rancher OIDC authorization code for an ID token,
 // extracts user claims (sub, preferred_username, email, groups, roles), and returns them.
-func (s *OAuthServerService) ExchangeRancherCode(rancherCode string, cfg *config.Config) (string, map[string]interface{}, string, error) {
+func (s *OAuthServerService) ExchangeRancherCode(rancherCode string, pkceVerifier string, cfg *config.Config) (string, map[string]interface{}, string, error) {
 	// Build token exchange request to Rancher
-	tokenURL := fmt.Sprintf("%s/v3/oauth2/token", cfg.RancherIssuerURL)
+	tokenURL := fmt.Sprintf("%s/token", cfg.RancherIssuerURL)
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", rancherCode)
 	data.Set("client_id", cfg.RancherClientID)
 	data.Set("client_secret", cfg.RancherClientSecret)
 	data.Set("redirect_uri", cfg.OAuthIssuerURL+"/oauth/callback")
+	if pkceVerifier != "" {
+		data.Set("code_verifier", pkceVerifier)
+	}
 
 	resp, err := s.httpClient.PostForm(tokenURL, data)
 	if err != nil {

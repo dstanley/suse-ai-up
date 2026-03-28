@@ -5,6 +5,7 @@ set -euo pipefail
 
 PROXY_URL="${PROXY_URL:-http://localhost:8911}"
 REDIRECT_URI="${REDIRECT_URI:-http://localhost:3000/callback}"
+CURL_INSECURE="${CURL_INSECURE:-}"  # Set to "-k" for self-signed certs
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,13 +23,13 @@ info() { echo -e "${YELLOW}INFO${NC}: $1"; }
 step 1 "OAuth Discovery (RFC 9728 + RFC 8414)"
 
 info "Fetching protected resource metadata..."
-RESOURCE_META=$(curl -sf "${PROXY_URL}/.well-known/oauth-protected-resource") || fail "Protected resource metadata unavailable"
+RESOURCE_META=$(curl -sf ${CURL_INSECURE} "${PROXY_URL}/.well-known/oauth-protected-resource") || fail "Protected resource metadata unavailable"
 echo "$RESOURCE_META" | jq .
 AS_URL=$(echo "$RESOURCE_META" | jq -r '.authorization_servers[0]')
 ok "Authorization server: ${AS_URL}"
 
 info "Fetching authorization server metadata..."
-AS_META=$(curl -sf "${PROXY_URL}/.well-known/oauth-authorization-server") || fail "AS metadata unavailable"
+AS_META=$(curl -sf ${CURL_INSECURE} "${PROXY_URL}/.well-known/oauth-authorization-server") || fail "AS metadata unavailable"
 echo "$AS_META" | jq .
 
 AUTH_ENDPOINT=$(echo "$AS_META" | jq -r '.authorization_endpoint')
@@ -41,7 +42,7 @@ ok "Discovered endpoints: authorize, token, register, revoke"
 
 step 2 "Dynamic Client Registration"
 
-REG_RESPONSE=$(curl -sf -X POST "${REG_ENDPOINT}" \
+REG_RESPONSE=$(curl -sf ${CURL_INSECURE} -X POST "${REG_ENDPOINT}" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_name\": \"OAuth V2 Demo Client\",
@@ -95,7 +96,7 @@ fi
 if [ -n "$AUTH_CODE" ]; then
   step 5 "Exchange Authorization Code for Tokens"
 
-  TOKEN_RESPONSE=$(curl -sf -X POST "${TOKEN_ENDPOINT}" \
+  TOKEN_RESPONSE=$(curl -sf ${CURL_INSECURE} -X POST "${TOKEN_ENDPOINT}" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "grant_type=authorization_code&code=${AUTH_CODE}&redirect_uri=${REDIRECT_URI}&client_id=${CLIENT_ID}&code_verifier=${CODE_VERIFIER}") || fail "Token exchange failed"
 
@@ -116,7 +117,7 @@ if [ -n "$AUTH_CODE" ]; then
   step 6 "Authenticated MCP Request"
 
   info "Listing adapters with bearer token..."
-  curl -sf "${PROXY_URL}/api/v1/adapters" \
+  curl -sf ${CURL_INSECURE} "${PROXY_URL}/api/v1/adapters" \
     -H "Authorization: Bearer ${ACCESS_TOKEN}" | jq . || info "No adapters configured yet"
   ok "Authenticated request succeeded"
 
@@ -124,7 +125,7 @@ if [ -n "$AUTH_CODE" ]; then
 
   step 7 "Refresh Token Rotation"
 
-  REFRESH_RESPONSE=$(curl -sf -X POST "${TOKEN_ENDPOINT}" \
+  REFRESH_RESPONSE=$(curl -sf ${CURL_INSECURE} -X POST "${TOKEN_ENDPOINT}" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "grant_type=refresh_token&refresh_token=${REFRESH_TOKEN}&client_id=${CLIENT_ID}") || fail "Token refresh failed"
 
@@ -140,7 +141,7 @@ if [ -n "$AUTH_CODE" ]; then
 
   step 11 "Token Revocation"
 
-  curl -sf -X POST "${REVOKE_ENDPOINT}" \
+  curl -sf ${CURL_INSECURE} -X POST "${REVOKE_ENDPOINT}" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "token=${ACCESS_TOKEN}&client_id=${CLIENT_ID}" || fail "Revocation request failed"
   ok "Token revoked (server always returns 200 per RFC 7009)"
@@ -235,7 +236,7 @@ ok "Proxy uses X.509 SVID for mutual TLS — no bearer tokens, certificates auto
 step 11 "Authorization Policies"
 
 info "Creating policy: only database-admins can use drop_table..."
-POLICY_RESPONSE=$(curl -sf -X POST "${PROXY_URL}/api/v1/auth/policies" \
+POLICY_RESPONSE=$(curl -sf ${CURL_INSECURE} -X POST "${PROXY_URL}/api/v1/auth/policies" \
   -H "Content-Type: application/json" \
   -d '{
     "adapter_name": "databricks-mcp",
@@ -250,7 +251,7 @@ POLICY_RESPONSE=$(curl -sf -X POST "${PROXY_URL}/api/v1/auth/policies" \
 } || info "Policy creation skipped (proxy may not be running)"
 
 info "Listing all policies..."
-curl -sf "${PROXY_URL}/api/v1/auth/policies" | jq . 2>/dev/null || info "Policies endpoint not available"
+curl -sf ${CURL_INSECURE} "${PROXY_URL}/api/v1/auth/policies" | jq . 2>/dev/null || info "Policies endpoint not available"
 
 # ─── Summary ─────────────────────────────────────────────────────────
 

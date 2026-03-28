@@ -92,6 +92,16 @@ type RegistrationRateLimit struct {
 	Count       int       `json:"count"`
 }
 
+// ScopePolicy maps user groups/users to backend scopes for an adapter.
+// When a user matches multiple policies, their scopes are merged (union).
+// If no policies match, the adapter's default Scopes field is used as fallback.
+type ScopePolicy struct {
+	Groups   []string `json:"groups,omitempty"`   // Match users in any of these groups
+	Users    []string `json:"users,omitempty"`    // Match specific user IDs
+	Scopes   []string `json:"scopes"`             // Backend scopes to grant
+	Priority int      `json:"priority,omitempty"` // Higher priority evaluated first (default 0)
+}
+
 // TokenExchangeConfig holds RFC 8693 token exchange configuration for an adapter.
 type TokenExchangeConfig struct {
 	TokenEndpoint    string   `json:"token_endpoint"`
@@ -102,6 +112,9 @@ type TokenExchangeConfig struct {
 	// UseWorkloadIdentity indicates the subject token should come from SPIRE (JWT SVID)
 	// instead of the user's Rancher ID token
 	UseWorkloadIdentity bool `json:"use_workload_identity,omitempty"`
+	// ScopePolicies maps user identity to backend scopes. If set, scopes are resolved
+	// per-user based on their groups/identity instead of using the static Scopes field.
+	ScopePolicies []ScopePolicy `json:"scope_policies,omitempty"`
 }
 
 // ServiceAccountConfig holds service account impersonation configuration.
@@ -110,4 +123,9 @@ type ServiceAccountConfig struct {
 	Password            string `json:"password"`
 	ImpersonationHeader string `json:"impersonation_header"`
 	ImpersonationField  string `json:"impersonation_field"`
+	// ScopeHeader is the HTTP header name to send resolved scopes to the backend.
+	// If set, the proxy sends the user's resolved scopes via this header.
+	ScopeHeader string `json:"scope_header,omitempty"`
+	// ScopePolicies maps user identity to backend scopes for service account mode.
+	ScopePolicies []ScopePolicy `json:"scope_policies,omitempty"`
 }

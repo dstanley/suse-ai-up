@@ -69,6 +69,18 @@ func (tvs *TokenVaultService) GetOrExchangeToken(userID, adapterName, subjectTok
 	return tvs.performTokenExchange(userID, adapterName, subjectToken, exchangeConfig)
 }
 
+// GetOrExchangeTokenWithScopes retrieves a cached token or performs an RFC 8693 token exchange
+// with user-specific scopes resolved from scope policies. The resolved scopes override the
+// static Scopes field on the exchange config for this request.
+func (tvs *TokenVaultService) GetOrExchangeTokenWithScopes(userID, adapterName, subjectToken string, exchangeConfig *models.TokenExchangeConfig, resolvedScopes []string) (*models.TokenVaultEntry, error) {
+	// Create a copy of the config with resolved scopes
+	configCopy := *exchangeConfig
+	if len(resolvedScopes) > 0 {
+		configCopy.Scopes = resolvedScopes
+	}
+	return tvs.GetOrExchangeToken(userID, adapterName, subjectToken, &configCopy)
+}
+
 // performTokenExchange executes an RFC 8693 token exchange request.
 func (tvs *TokenVaultService) performTokenExchange(userID, adapterName, subjectToken string, exchangeConfig *models.TokenExchangeConfig) (*models.TokenVaultEntry, error) {
 	data := url.Values{}

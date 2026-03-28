@@ -13,10 +13,10 @@ import (
 
 // MCPAuthIntegrationService handles authentication integration for MCP adapters
 type MCPAuthIntegrationService struct {
-	tokenManager     *auth.TokenManager
+	tokenManager      *auth.TokenManager
 	tokenVaultService *TokenVaultService
-	oauthService     *OAuthServerService
-	httpClient       *http.Client
+	oauthService      *OAuthServerService
+	httpClient        *http.Client
 }
 
 // NewMCPAuthIntegrationService creates a new MCP auth integration service
@@ -196,6 +196,7 @@ func (mais *MCPAuthIntegrationService) GetUserToken(adapter models.AdapterResour
 }
 
 // getTokenExchangeToken performs RFC 8693 token exchange for the user.
+// Scope policies are resolved from the user's session claims before exchange.
 func (mais *MCPAuthIntegrationService) getTokenExchangeToken(adapter models.AdapterResource, userID, accessToken string) (*ClientTokenResponse, error) {
 	if mais.tokenVaultService == nil {
 		return nil, fmt.Errorf("token vault service not configured")
@@ -207,7 +208,7 @@ func (mais *MCPAuthIntegrationService) getTokenExchangeToken(adapter models.Adap
 		return nil, fmt.Errorf("token_exchange configuration not found for adapter %s", adapter.Name)
 	}
 
-	// Look up the user's session to get the Rancher ID token
+	// Look up the user's session to get the Rancher ID token and claims
 	session, err := mais.oauthService.GetSessionByAccessToken(accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find session for token exchange: %w", err)
@@ -217,8 +218,28 @@ func (mais *MCPAuthIntegrationService) getTokenExchangeToken(adapter models.Adap
 		return nil, fmt.Errorf("no Rancher ID token in session for token exchange")
 	}
 
-	// Exchange or retrieve cached downstream token
-	entry, err := mais.tokenVaultService.GetOrExchangeToken(userID, adapter.Name, session.RancherIDToken, adapter.Authentication.TokenExchange)
+	exchangeConfig := adapter.Authentication.TokenExchange
+
+	// Resolve user-specific scopes if scope policies are configured
+	if len(exchangeConfig.ScopePolicies) > 0 {
+		userCtx := userContextFromSession(session)
+		resolvedScopes := auth.ResolveScopesForUser(exchangeConfig.ScopePolicies, userCtx, exchangeConfig.Scopes)
+		log.Printf("Scope resolution for user %s on adapter %s: %v (from %d policies)", userID, adapter.Name, resolvedScopes, len(exchangeConfig.ScopePolicies))
+
+		entry, err := mais.tokenVaultService.GetOrExchangeTokenWithScopes(userID, adapter.Name, session.RancherIDToken, exchangeConfig, resolvedScopes)
+		if err != nil {
+			return nil, fmt.Errorf("token exchange failed for adapter %s: %w", adapter.Name, err)
+		}
+		return &ClientTokenResponse{
+			Token:     entry.AccessToken,
+			Type:      "bearer",
+			ExpiresAt: entry.ExpiresAt,
+			Message:   fmt.Sprintf("Using exchanged token via RFC 8693 (scopes: %v)", resolvedScopes),
+		}, nil
+	}
+
+	// No scope policies — use static scopes from config (existing behavior)
+	entry, err := mais.tokenVaultService.GetOrExchangeToken(userID, adapter.Name, session.RancherIDToken, exchangeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange failed for adapter %s: %w", adapter.Name, err)
 	}
@@ -337,6 +358,7 @@ func (mais *MCPAuthIntegrationService) applySPIFFEAuth(req *http.Request, adapte
 }
 
 // applyServiceAccountAuth applies service account credentials with impersonation headers.
+// If scope policies are configured, resolved scopes are sent via the configured ScopeHeader.
 func (mais *MCPAuthIntegrationService) applyServiceAccountAuth(req *http.Request, adapter models.AdapterResource, userID, userEmail string) error {
 	sa := adapter.Authentication.ServiceAccount
 	if sa == nil {
@@ -353,6 +375,16 @@ func (mais *MCPAuthIntegrationService) applyServiceAccountAuth(req *http.Request
 	}
 	if impersonationValue != "" && sa.ImpersonationHeader != "" {
 		req.Header.Set(sa.ImpersonationHeader, impersonationValue)
+	}
+
+	// Resolve and send user-specific scopes if scope policies are configured
+	if len(sa.ScopePolicies) > 0 && sa.ScopeHeader != "" {
+		userCtx := mais.buildUserContextForServiceAccount(userID, userEmail, adapter)
+		resolvedScopes := auth.ResolveScopesForUser(sa.ScopePolicies, userCtx, nil)
+		if len(resolvedScopes) > 0 {
+			req.Header.Set(sa.ScopeHeader, strings.Join(resolvedScopes, " "))
+			log.Printf("Service account scope resolution for user %s on adapter %s: %v", userID, adapter.Name, resolvedScopes)
+		}
 	}
 
 	return nil
@@ -593,6 +625,73 @@ func (mais *MCPAuthIntegrationService) validateServiceAccountConfig(auth *models
 	}
 	if auth.ServiceAccount.ImpersonationHeader == "" {
 		return fmt.Errorf("service_account impersonation_header is required")
+	}
+	return nil
+}
+
+// userContextFromSession builds an auth.UserContext from an OAuth session's claims.
+// Groups and roles are extracted from the OIDC claims stored in the session.
+func userContextFromSession(session *models.OAuthSession) *auth.UserContext {
+	ctx := &auth.UserContext{
+		UserID: session.UserID,
+	}
+
+	if session.UserClaims != nil {
+		if username, ok := session.UserClaims["username"].(string); ok {
+			ctx.Username = username
+		}
+		if email, ok := session.UserClaims["email"].(string); ok {
+			ctx.Email = email
+		}
+		ctx.Groups = extractStringSlice(session.UserClaims, "groups")
+		ctx.Roles = extractStringSlice(session.UserClaims, "roles")
+	}
+
+	return ctx
+}
+
+// buildUserContextForServiceAccount builds a UserContext for service account auth.
+// Since service account auth doesn't go through the OAuth session flow, we build
+// context from the available user identity fields.
+func (mais *MCPAuthIntegrationService) buildUserContextForServiceAccount(userID, userEmail string, adapter models.AdapterResource) *auth.UserContext {
+	ctx := &auth.UserContext{
+		UserID: userID,
+		Email:  userEmail,
+	}
+
+	// Try to get groups from the user's OAuth session if available
+	if mais.oauthService != nil {
+		sessions := mais.oauthService.GetSessionsByUserID(userID)
+		if len(sessions) > 0 {
+			sessionCtx := userContextFromSession(sessions[0])
+			ctx.Groups = sessionCtx.Groups
+			ctx.Roles = sessionCtx.Roles
+			ctx.Username = sessionCtx.Username
+		}
+	}
+
+	return ctx
+}
+
+// extractStringSlice extracts a string slice from a claims map.
+// Handles both []string and []interface{} formats from JSON deserialization.
+func extractStringSlice(claims map[string]interface{}, key string) []string {
+	val, ok := claims[key]
+	if !ok {
+		return nil
+	}
+
+	switch v := val.(type) {
+	case []string:
+		return v
+	case []interface{}:
+		result := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
 	}
 	return nil
 }

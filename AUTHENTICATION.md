@@ -741,6 +741,135 @@ The system supports granular permissions for different operations:
 - **Rancher**: Users in configured admin groups automatically get `mcp-admins` group
 - **Local**: Groups assigned during user creation or via API
 
+## Adapter Authentication and Scope Policies
+
+The proxy supports two patterns for authenticating to backend MCP servers:
+
+### M2M (Machine-to-Machine)
+
+The proxy authenticates to the backend using its own credentials. The user's identity is either irrelevant or passed as metadata (e.g., via impersonation headers).
+
+| Auth Type | Description | Use Case |
+|-----------|-------------|----------|
+| `bearer` | Static or dynamic bearer token | Shared API keys |
+| `apikey` | API key in header/query/cookie | Simple service auth |
+| `basic` | Username/password | Legacy services |
+| `service_account` | Proxy's own credentials + user impersonation header | ServiceNow, Jira |
+| `spiffe` (mTLS) | X.509 SVID certificate-based auth | Zero-trust internal services |
+
+### U2M (User-to-Machine)
+
+The user's own identity and permissions flow through to the backend. The backend enforces authorization based on who the user is.
+
+| Auth Type | Description | Use Case |
+|-----------|-------------|----------|
+| `token_exchange` | RFC 8693 exchange of user's Rancher ID token for backend token | Databricks, cloud APIs |
+| `spiffe` (JWT) | SPIRE JWT SVID exchanged for backend token | Workload identity |
+
+### Scope Policies
+
+Scope policies map user identity (groups, roles, user IDs) to backend-specific scopes per adapter. This allows different users to receive different permissions when accessing the same backend service.
+
+**Resolution rules:**
+1. All matching policies' scopes are merged (union)
+2. A policy matches if the user is in any of its `groups` or `users` lists
+3. Empty `groups` and `users` = default policy (matches all users)
+4. If no policies match, the adapter's static `scopes` field is used as fallback
+5. Policies are evaluated in `priority` order (highest first)
+
+#### Token Exchange with Scope Policies
+
+When the proxy exchanges a user's Rancher ID token for a backend token via RFC 8693, scope policies determine which scopes are requested from the backend token endpoint.
+
+```json
+{
+  "authentication": {
+    "required": true,
+    "type": "token_exchange",
+    "tokenExchange": {
+      "token_endpoint": "https://accounts.cloud.databricks.com/oidc/v1/token",
+      "audience": "https://databricks.example.com",
+      "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+      "scopes": ["sql:read"],
+      "scope_policies": [
+        {
+          "groups": ["data-engineers"],
+          "scopes": ["sql:read", "sql:write", "clusters:manage"],
+          "priority": 10
+        },
+        {
+          "groups": ["analysts"],
+          "scopes": ["sql:read"]
+        },
+        {
+          "scopes": ["sql:read"],
+          "priority": 0
+        }
+      ]
+    }
+  }
+}
+```
+
+In this example:
+- Users in `data-engineers` get `sql:read`, `sql:write`, and `clusters:manage`
+- Users in `analysts` get `sql:read`
+- A user in both groups gets the union: `sql:read`, `sql:write`, `clusters:manage`
+- Users matching no group get the default policy: `sql:read`
+- If no scope policies are defined, the static `scopes` field (`["sql:read"]`) is used for all users
+
+#### Service Account with Scope Policies
+
+For service account authentication, the proxy authenticates as itself but can send the user's resolved scopes to the backend via a configurable HTTP header.
+
+```json
+{
+  "authentication": {
+    "required": true,
+    "type": "service_account",
+    "serviceAccount": {
+      "username": "mcp-proxy-sa",
+      "password": "from-csi-secret-store",
+      "impersonation_header": "X-UserToken",
+      "impersonation_field": "email",
+      "scope_header": "X-User-Scopes",
+      "scope_policies": [
+        {
+          "groups": ["it-admins"],
+          "scopes": ["incident:write", "cmdb:write"]
+        },
+        {
+          "groups": ["helpdesk"],
+          "scopes": ["incident:read", "incident:write"]
+        },
+        {
+          "scopes": ["incident:read"]
+        }
+      ]
+    }
+  }
+}
+```
+
+In this example:
+- The proxy authenticates as `mcp-proxy-sa` (M2M credential)
+- The user's email is sent via `X-UserToken` header (impersonation)
+- The user's resolved scopes are sent via `X-User-Scopes` header
+- Users in `it-admins` get scopes `incident:write cmdb:write`
+- Users in `helpdesk` get `incident:read incident:write`
+- Everyone else gets `incident:read`
+
+#### Scope Policy Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `groups` | `[]string` | Match users in any of these groups or roles |
+| `users` | `[]string` | Match specific user IDs, usernames, or emails |
+| `scopes` | `[]string` | Backend scopes to grant when matched |
+| `priority` | `int` | Evaluation order (highest first, default 0) |
+
+User groups and roles are sourced from the OIDC claims in the user's authenticated session.
+
 ## Development Mode
 
 When `DEV_MODE=true`, authentication is bypassed and you can use X-User-ID headers:

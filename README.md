@@ -16,6 +16,8 @@ A comprehensive, modular MCP (Model Context Protocol) proxy system that enables 
 
 **🔌 Plugin Management** - Dynamic plugin system for extending functionality with service registration, health monitoring, and capability routing.
 
+**🔐 Adapter Authentication** - M2M and U2M authentication patterns for backend MCP servers, including OAuth 2.1 + PKCE, RFC 8693 token exchange, service account impersonation, SPIFFE/SPIRE workload identity, and per-user scope policies that map Rancher groups to backend-specific permissions.
+
 ## 📖 Documentation
 
 - **[QUICKSTART](QUICKSTART.md)** - Get started quickly with SUSE AI Universal Proxy

@@ -71,6 +71,7 @@ type Config struct {
 	RancherRedirectURI   string   `json:"rancher_redirect_uri"`
 	RancherAdminGroups   []string `json:"rancher_admin_groups"`
 	RancherFallbackLocal bool     `json:"rancher_fallback_local"`
+	RancherTLSSkipVerify bool     `json:"rancher_tls_skip_verify"`
 
 	// Initial Users and Groups
 	CreateInitialUsers  bool           `json:"create_initial_users"`
@@ -199,6 +200,7 @@ func LoadConfig() *Config {
 		RancherRedirectURI:   getEnv("RANCHER_REDIRECT_URI", ""),
 		RancherAdminGroups:   parseStringSlice(getEnv("RANCHER_ADMIN_GROUPS", "")),
 		RancherFallbackLocal: getEnvBool("RANCHER_FALLBACK_LOCAL", true),
+		RancherTLSSkipVerify: getEnvBool("RANCHER_TLS_SKIP_VERIFY", false),
 
 		// Initial Users and Groups
 		CreateInitialUsers:  getEnvBool("CREATE_INITIAL_USERS", true),

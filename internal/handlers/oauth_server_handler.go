@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -131,6 +134,9 @@ func (h *OAuthServerHandler) Authorize(c *gin.Context) {
 		return
 	}
 
+	// Generate PKCE verifier/challenge for the Rancher OIDC leg
+	rancherVerifier, rancherChallenge := generatePKCE()
+
 	// Store authorization request parameters in a temporary session cookie
 	// so the callback can retrieve them after Rancher authentication
 	params := url.Values{}
@@ -140,12 +146,13 @@ func (h *OAuthServerHandler) Authorize(c *gin.Context) {
 	params.Set("code_challenge_method", codeChallengeMethod)
 	params.Set("scope", scope)
 	params.Set("state", state)
+	params.Set("rancher_pkce_verifier", rancherVerifier)
 
 	// Store in a secure cookie for the callback to read
 	c.SetCookie("oauth_params", params.Encode(), 600, "/", "", false, true)
 
 	// Build Rancher OIDC authorization URL and redirect
-	rancherAuthURL := h.buildRancherAuthURL(state)
+	rancherAuthURL := h.buildRancherAuthURL(state, rancherChallenge)
 	c.Redirect(http.StatusFound, rancherAuthURL)
 }
 
@@ -266,6 +273,7 @@ func (h *OAuthServerHandler) Callback(c *gin.Context) {
 	codeChallengeMethod := oauthParams.Get("code_challenge_method")
 	scope := oauthParams.Get("scope")
 	state := oauthParams.Get("state")
+	rancherPKCEVerifier := oauthParams.Get("rancher_pkce_verifier")
 
 	if rancherError != "" {
 		h.auditLogger.Log(auth.AuditEvent{
@@ -285,7 +293,7 @@ func (h *OAuthServerHandler) Callback(c *gin.Context) {
 	}
 
 	// Exchange the Rancher code for user claims and ID token
-	userID, userClaims, rancherIDToken, err := h.oauthService.ExchangeRancherCode(rancherCode, h.cfg)
+	userID, userClaims, rancherIDToken, err := h.oauthService.ExchangeRancherCode(rancherCode, rancherPKCEVerifier, h.cfg)
 	if err != nil {
 		h.auditLogger.Log(auth.AuditEvent{
 			EventType: auth.AuditEventLoginFailed,
@@ -493,15 +501,27 @@ func (h *OAuthServerHandler) DeletePolicy(c *gin.Context) {
 
 // --- Helpers ---
 
-func (h *OAuthServerHandler) buildRancherAuthURL(state string) string {
+func (h *OAuthServerHandler) buildRancherAuthURL(state, codeChallenge string) string {
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", h.cfg.RancherClientID)
 	params.Set("redirect_uri", h.cfg.OAuthIssuerURL+"/oauth/callback")
-	params.Set("scope", "openid profile email groups")
+	params.Set("scope", "openid profile offline_access")
 	params.Set("state", state)
+	params.Set("code_challenge", codeChallenge)
+	params.Set("code_challenge_method", "S256")
 
-	return fmt.Sprintf("%s/v3/oauth2/authorize?%s", h.cfg.RancherIssuerURL, params.Encode())
+	return fmt.Sprintf("%s/authorize?%s", h.cfg.RancherIssuerURL, params.Encode())
+}
+
+// generatePKCE creates a PKCE verifier and S256 challenge for the Rancher OIDC flow.
+func generatePKCE() (verifier, challenge string) {
+	buf := make([]byte, 32)
+	_, _ = rand.Read(buf)
+	verifier = base64.RawURLEncoding.EncodeToString(buf)
+	h := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(h[:])
+	return
 }
 
 func (h *OAuthServerHandler) getOAuthParamsFromCookie(c *gin.Context) url.Values {

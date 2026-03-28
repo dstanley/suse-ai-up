@@ -75,6 +75,7 @@ serviceApiKeys: ""
 auth:
   mode: "local"  # local, github, rancher, dev
   devMode: false  # Enable development mode (bypass auth)
+  oauthIssuerUrl: ""  # External URL for OAuth issuer (used in WWW-Authenticate headers, token iss claim)
 
   # Local authentication (password-based)
   local:

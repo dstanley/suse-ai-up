@@ -464,7 +464,11 @@ func RunUniproxy() {
 	adapterStore := clients.NewFileAdapterStore(adapterStorePath, crypto)
 	adapterGroupAssignmentStore := clients.NewFileAdapterGroupAssignmentStore(adapterGroupAssignmentStorePath, crypto)
 
-	tokenManager, err := auth.NewTokenManager("mcp-gateway")
+	oauthIssuer := cfg.OAuthIssuerURL
+	if oauthIssuer == "" {
+		oauthIssuer = "mcp-gateway"
+	}
+	tokenManager, err := auth.NewTokenManager(oauthIssuer)
 	if err != nil {
 		log.Fatalf("Failed to create token manager: %v", err)
 	}

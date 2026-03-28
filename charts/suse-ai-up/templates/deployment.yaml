@@ -46,6 +46,10 @@ spec:
               value: "{{ .Values.auth.mode }}"
             - name: DEV_MODE
               value: "{{ .Values.auth.devMode }}"
+            {{- if .Values.auth.oauthIssuerUrl }}
+            - name: OAUTH_ISSUER_URL
+              value: "{{ .Values.auth.oauthIssuerUrl }}"
+            {{- end }}
 {{- if eq .Values.auth.mode "local" }}
             - name: ADMIN_PASSWORD
               value: "{{ .Values.auth.local.defaultAdminPassword }}"

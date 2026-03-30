@@ -714,7 +714,7 @@ func (h *UnifiedMCPHandler) fetchToolsFromAdapter(ctx context.Context, adapter m
 		Params:  map[string]interface{}{},
 	}
 
-	resp, err := h.makeAdapterRequest(ctx, adapter.RemoteUrl, &req)
+	resp, err := h.makeAdapterRequest(ctx, adapter.RemoteUrl, &req, adapter)
 	if err != nil {
 		return nil, err
 	}
@@ -748,7 +748,7 @@ func (h *UnifiedMCPHandler) fetchResourcesFromAdapter(ctx context.Context, adapt
 		Params:  map[string]interface{}{},
 	}
 
-	resp, err := h.makeAdapterRequest(ctx, adapter.RemoteUrl, &req)
+	resp, err := h.makeAdapterRequest(ctx, adapter.RemoteUrl, &req, adapter)
 	if err != nil {
 		return nil, err
 	}
@@ -782,7 +782,7 @@ func (h *UnifiedMCPHandler) fetchPromptsFromAdapter(ctx context.Context, adapter
 		Params:  map[string]interface{}{},
 	}
 
-	resp, err := h.makeAdapterRequest(ctx, adapter.RemoteUrl, &req)
+	resp, err := h.makeAdapterRequest(ctx, adapter.RemoteUrl, &req, adapter)
 	if err != nil {
 		return nil, err
 	}
@@ -808,8 +808,9 @@ func (h *UnifiedMCPHandler) fetchPromptsFromAdapter(ctx context.Context, adapter
 // makeAdapterRequest makes a JSON-RPC HTTP POST request to a remote MCP adapter.
 // It marshals the request to JSON, sends it to the specified URL, and parses the response.
 // The request is made with the context for cancellation and timeout support.
+// If an adapter is provided, downstream authentication (bearer, SPIFFE, etc.) is applied.
 // Returns the parsed MCP response or an error if the HTTP request or JSON parsing fails.
-func (h *UnifiedMCPHandler) makeAdapterRequest(ctx context.Context, url string, req *MCPRequest) (*MCPResponse, error) {
+func (h *UnifiedMCPHandler) makeAdapterRequest(ctx context.Context, url string, req *MCPRequest, adapter ...models.AdapterResource) (*MCPResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -821,6 +822,13 @@ func (h *UnifiedMCPHandler) makeAdapterRequest(ctx context.Context, url string, 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Apply downstream authentication if adapter is provided
+	if len(adapter) > 0 && h.authIntegration != nil && adapter[0].Authentication != nil && adapter[0].Authentication.Required {
+		if err := h.authIntegration.ApplyUserAuthToRequest(httpReq, adapter[0], "", "", ""); err != nil {
+			logging.ProxyLogger.Warn("makeAdapterRequest: Failed to apply auth for %s: %v", adapter[0].Name, err)
+		}
+	}
 
 	resp, err := h.httpClient.Do(httpReq)
 	if err != nil {

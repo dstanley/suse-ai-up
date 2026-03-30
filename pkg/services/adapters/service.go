@@ -225,19 +225,24 @@ func (as *AdapterService) CreateAdapter(ctx context.Context, userID, mcpServerID
 	}
 
 	// Set up authentication configuration
-	adapterData.Authentication = &models.AdapterAuthConfig{
-		Required: true,
-		Type:     "bearer",
-		BearerToken: &models.BearerTokenConfig{
-			Token:   token,
-			Dynamic: false,
-		},
+	// If the caller provided a specific auth config (e.g., SPIFFE), preserve it
+	if auth != nil && auth.Type != "" && auth.Type != "bearer" {
+		adapterData.Authentication = auth
+	} else {
+		adapterData.Authentication = &models.AdapterAuthConfig{
+			Required: true,
+			Type:     "bearer",
+			BearerToken: &models.BearerTokenConfig{
+				Token:   token,
+				Dynamic: false,
+			},
+		}
 	}
 
 	// Create adapter resource
 	adapter := &models.AdapterResource{}
-	// Set createdBy to "system" to prevent automatic user ownership
-	// Access should be granted via group assignments only
+	// Set createdBy to "system" — adapters are system-level resources
+	// Access is granted via group assignments
 	adapter.Create(*adapterData, "system", time.Now())
 
 	// Store adapter
@@ -841,7 +846,8 @@ func (as *AdapterService) GetAdapter(ctx context.Context, userID, adapterID stri
 	}
 
 	// Check if user can access this adapter
-	if adapter.CreatedBy != userID {
+	// System-owned adapters are accessible to all authenticated users
+	if adapter.CreatedBy != userID && adapter.CreatedBy != "system" {
 		// Check admin permissions
 		if userGroupService != nil {
 			if canManage, err := userGroupService.CanManageGroups(ctx, userID); err == nil && canManage {
@@ -882,10 +888,16 @@ func (as *AdapterService) ListAdapters(ctx context.Context, userID string, userG
 		}
 	}
 
-	// Regular users see their own adapters plus adapters assigned to their groups
+	// Regular users see their own adapters plus system-owned adapters plus group-assigned adapters
 	userAdapters, err := as.store.List(ctx, userID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Include system-owned adapters (available to all authenticated users)
+	systemAdapters, err := as.store.List(ctx, "system")
+	if err == nil {
+		userAdapters = append(userAdapters, systemAdapters...)
 	}
 
 	// Get user's groups

@@ -130,9 +130,10 @@ func MCPOAuthMiddleware(tokenManager *TokenManager) gin.HandlerFunc {
 			return
 		}
 
-		// Set user identity in context for downstream handlers
+		// Set user identity in context and header for downstream handlers
 		if sub, ok := claims["sub"].(string); ok {
 			c.Set("user_id", sub)
+			c.Request.Header.Set("X-User-ID", sub)
 		}
 		if username, ok := claims["username"].(string); ok {
 			c.Set("username", username)

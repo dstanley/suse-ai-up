@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 07 — SPIFFE/SPIRE Setup
 # Installs SPIRE in the cluster and configures the proxy for SPIFFE workload identity.
-# Run this once before running demo.sh.
+# Run this once before running demo.sh. Idempotent — skips anything already set up.
 set -euo pipefail
 
 SPIRE_NAMESPACE="${SPIRE_NAMESPACE:-spire-system}"
@@ -20,6 +20,7 @@ NC='\033[0m'
 
 step() { echo -e "\n${CYAN}=== Step $1: $2 ===${NC}\n"; }
 ok()   { echo -e "${GREEN}OK${NC}: $1"; }
+skip() { echo -e "${GREEN}SKIP${NC}: $1 (already done)"; }
 fail() { echo -e "${RED}FAIL${NC}: $1"; exit 1; }
 info() { echo -e "${YELLOW}INFO${NC}: $1"; }
 
@@ -30,90 +31,173 @@ echo "Namespace:    ${SPIRE_NAMESPACE}"
 echo "Tornjak UI:   ${ENABLE_TORNJAK}"
 echo ""
 
-# ─── Step 1: Prerequisites ────────────────────────────────────────
+# ─── Step 1: Preflight Checks ───────────────────────────────────
 
-step 1 "Check Prerequisites"
+step 1 "Preflight Checks"
 
-command -v helm &>/dev/null || fail "helm is required but not found"
-command -v kubectl &>/dev/null || fail "kubectl is required but not found"
-command -v jq &>/dev/null || fail "jq is required but not found"
+# Required tools
+MISSING_TOOLS=()
+command -v helm &>/dev/null || MISSING_TOOLS+=("helm")
+command -v kubectl &>/dev/null || MISSING_TOOLS+=("kubectl")
+command -v jq &>/dev/null || MISSING_TOOLS+=("jq")
 
-ok "helm, kubectl, and jq are available"
+if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
+  fail "Missing required tools: ${MISSING_TOOLS[*]}"
+fi
+ok "Required tools: helm, kubectl, jq"
 
-# ─── Step 2: Add Helm repo ────────────────────────────────────────
+# Cluster connectivity
+if ! kubectl cluster-info &>/dev/null; then
+  fail "Cannot connect to Kubernetes cluster. Check your kubeconfig."
+fi
+ok "Cluster is reachable"
 
-step 2 "Add SPIFFE Helm Repository"
+# Detect current state
+NEEDS_NAMESPACE=false
+NEEDS_CRDS=false
+NEEDS_SPIRE=false
+NEEDS_WAIT=false
+NEEDS_REGISTRATION=false
 
-helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true
-helm repo update
-
-ok "SPIFFE Helm repo ready"
-
-# ─── Step 3: Create namespace and install CRDs ────────────────────
-
-step 3 "Install CRDs"
-
-kubectl create namespace "${SPIRE_NAMESPACE}" 2>/dev/null || info "Namespace ${SPIRE_NAMESPACE} already exists"
-
-if helm status spire-crds -n "${SPIRE_NAMESPACE}" &>/dev/null; then
-  info "spire-crds already installed, upgrading..."
-  helm upgrade spire-crds spiffe/spire-crds --namespace "${SPIRE_NAMESPACE}"
+# Check namespace
+if kubectl get namespace "${SPIRE_NAMESPACE}" &>/dev/null; then
+  skip "Namespace ${SPIRE_NAMESPACE} exists"
 else
-  helm install spire-crds spiffe/spire-crds --namespace "${SPIRE_NAMESPACE}"
+  NEEDS_NAMESPACE=true
+  info "Namespace ${SPIRE_NAMESPACE} will be created"
 fi
 
-ok "SPIRE CRDs installed"
+# Check CRDs (use kubectl — helm status may fail through Rancher API proxy)
+if kubectl get crd clusterspiffeids.spire.spiffe.io &>/dev/null; then
+  skip "SPIRE CRDs installed"
+else
+  NEEDS_CRDS=true
+  info "SPIRE CRDs will be installed"
+fi
 
-# ─── Step 4: Install SPIRE ────────────────────────────────────────
+# Check SPIRE (detect by looking for the server pod, not helm status)
+SPIRE_SERVER_READY=$(kubectl -n "${SPIRE_NAMESPACE}" get pod "${SPIRE_SERVER_POD}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
+AGENT_COUNT=$(kubectl -n "${SPIRE_NAMESPACE}" get pods -l app.kubernetes.io/name=agent --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ') || true
 
-step 4 "Install SPIRE Server and Agent"
+if [ -n "$SPIRE_SERVER_READY" ]; then
+  # Server pod exists — SPIRE is installed
+  SPIRE_IMAGE=$(kubectl -n "${SPIRE_NAMESPACE}" get pod "${SPIRE_SERVER_POD}" -o jsonpath='{.spec.containers[0].image}' 2>/dev/null) || true
+  skip "SPIRE installed (${SPIRE_IMAGE:-unknown})"
 
-HELM_ARGS=(
-  --namespace "${SPIRE_NAMESPACE}"
-  --set "global.spire.clusterName=${SPIRE_CLUSTER_NAME}"
-  --set "global.spire.trustDomain=${SPIRE_TRUST_DOMAIN}"
-)
+  if [ "$SPIRE_SERVER_READY" = "True" ] && [ "$AGENT_COUNT" -gt 0 ]; then
+    skip "SPIRE server ready, ${AGENT_COUNT} agent(s) running"
+  else
+    NEEDS_WAIT=true
+    info "SPIRE installed but pods not ready — will wait"
+  fi
+else
+  NEEDS_SPIRE=true
+  info "SPIRE will be installed"
+fi
 
-if [ "${ENABLE_TORNJAK}" = "true" ]; then
-  HELM_ARGS+=(
-    --set "tornjak-frontend.enabled=true"
-    --set "spire-server.tornjak.enabled=true"
-    --set "tornjak-frontend.apiServerURL=http://localhost:10000"
+# Check workload registration
+SPIFFE_ID="spiffe://${SPIRE_TRUST_DOMAIN}/suse-ai-up"
+if [ "$NEEDS_SPIRE" = "false" ] && [ "$NEEDS_WAIT" = "false" ]; then
+  EXISTING=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+    /opt/spire/bin/spire-server entry show -spiffeID "${SPIFFE_ID}" 2>/dev/null) || true
+  if echo "$EXISTING" | grep -q "Entry ID"; then
+    skip "Proxy workload registered (${SPIFFE_ID})"
+  else
+    NEEDS_REGISTRATION=true
+    info "Proxy workload will be registered"
+  fi
+else
+  NEEDS_REGISTRATION=true
+fi
+
+# Summary
+echo ""
+if [ "$NEEDS_NAMESPACE" = "false" ] && [ "$NEEDS_CRDS" = "false" ] && \
+   [ "$NEEDS_SPIRE" = "false" ] && [ "$NEEDS_WAIT" = "false" ] && \
+   [ "$NEEDS_REGISTRATION" = "false" ]; then
+  echo -e "${GREEN}Everything is already set up. Nothing to do.${NC}"
+  echo ""
+  echo "Next steps:"
+  echo "  ./demo.sh"
+  exit 0
+fi
+
+# ─── Step 2: Add Helm repo ──────────────────────────────────────
+
+if [ "$NEEDS_CRDS" = "true" ] || [ "$NEEDS_SPIRE" = "true" ]; then
+  step 2 "Add SPIFFE Helm Repository"
+
+  helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true
+  helm repo update
+
+  ok "SPIFFE Helm repo ready"
+fi
+
+# ─── Step 3: Create namespace and install CRDs ──────────────────
+
+if [ "$NEEDS_NAMESPACE" = "true" ] || [ "$NEEDS_CRDS" = "true" ]; then
+  step 3 "Install CRDs"
+
+  if [ "$NEEDS_NAMESPACE" = "true" ]; then
+    kubectl create namespace "${SPIRE_NAMESPACE}" 2>/dev/null || true
+    ok "Namespace ${SPIRE_NAMESPACE} created"
+  fi
+
+  if [ "$NEEDS_CRDS" = "true" ]; then
+    helm install spire-crds spiffe/spire-crds --namespace "${SPIRE_NAMESPACE}"
+    ok "SPIRE CRDs installed"
+  fi
+fi
+
+# ─── Step 4: Install SPIRE ──────────────────────────────────────
+
+if [ "$NEEDS_SPIRE" = "true" ]; then
+  step 4 "Install SPIRE Server and Agent"
+
+  HELM_ARGS=(
+    --namespace "${SPIRE_NAMESPACE}"
+    --set "global.spire.clusterName=${SPIRE_CLUSTER_NAME}"
+    --set "global.spire.trustDomain=${SPIRE_TRUST_DOMAIN}"
   )
-  info "Tornjak UI will be enabled"
-fi
 
-if helm status spire -n "${SPIRE_NAMESPACE}" &>/dev/null; then
-  info "SPIRE already installed, upgrading..."
-  helm upgrade spire spiffe/spire "${HELM_ARGS[@]}"
-else
+  if [ "${ENABLE_TORNJAK}" = "true" ]; then
+    HELM_ARGS+=(
+      --set "tornjak-frontend.enabled=true"
+      --set "spire-server.tornjak.enabled=true"
+      --set "tornjak-frontend.apiServerURL=http://localhost:10000"
+    )
+    info "Tornjak UI will be enabled"
+  fi
+
   helm install spire spiffe/spire "${HELM_ARGS[@]}"
+  ok "SPIRE installed"
+  NEEDS_WAIT=true
 fi
 
-ok "SPIRE installed"
+# ─── Step 5: Wait for pods ──────────────────────────────────────
 
-# ─── Step 5: Wait for pods ────────────────────────────────────────
+if [ "$NEEDS_WAIT" = "true" ]; then
+  step 5 "Wait for SPIRE Pods"
 
-step 5 "Wait for SPIRE Pods"
+  info "Waiting for SPIRE server to be ready..."
+  kubectl -n "${SPIRE_NAMESPACE}" wait --for=condition=ready pod/"${SPIRE_SERVER_POD}" --timeout=120s 2>/dev/null || {
+    info "Timeout waiting for SPIRE server. Current pod status:"
+    kubectl -n "${SPIRE_NAMESPACE}" get pods
+    fail "SPIRE server not ready"
+  }
 
-info "Waiting for SPIRE server to be ready..."
-kubectl -n "${SPIRE_NAMESPACE}" wait --for=condition=ready pod/"${SPIRE_SERVER_POD}" --timeout=120s 2>/dev/null || {
-  info "Timeout waiting for SPIRE server. Current pod status:"
+  info "Waiting for SPIRE agent to be ready..."
+  kubectl -n "${SPIRE_NAMESPACE}" wait --for=condition=ready -l app.kubernetes.io/name=agent pod --timeout=120s 2>/dev/null || {
+    info "Timeout waiting for SPIRE agent"
+  }
+
+  echo ""
   kubectl -n "${SPIRE_NAMESPACE}" get pods
-  fail "SPIRE server not ready"
-}
+  echo ""
+  ok "SPIRE pods are running"
+fi
 
-info "Waiting for SPIRE agent to be ready..."
-kubectl -n "${SPIRE_NAMESPACE}" wait --for=condition=ready -l app.kubernetes.io/name=agent pod --timeout=120s 2>/dev/null || {
-  info "Timeout waiting for SPIRE agent"
-}
-
-echo ""
-kubectl -n "${SPIRE_NAMESPACE}" get pods
-echo ""
-ok "SPIRE pods are running"
-
-# ─── Step 6: Verify health ────────────────────────────────────────
+# ─── Step 6: Verify health ──────────────────────────────────────
 
 step 6 "Verify SPIRE Health"
 
@@ -126,32 +210,30 @@ else
   info "SPIRE server health: ${HEALTH:-unknown}"
 fi
 
-# ─── Step 7: Register proxy workload ──────────────────────────────
+# ─── Step 7: Register proxy workload ────────────────────────────
 
-step 7 "Register Proxy Workload"
+if [ "$NEEDS_REGISTRATION" = "true" ]; then
+  step 7 "Register Proxy Workload"
 
-SPIFFE_ID="spiffe://${SPIRE_TRUST_DOMAIN}/suse-ai-up"
+  # Re-check in case we just waited for pods
+  EXISTING=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+    /opt/spire/bin/spire-server entry show -spiffeID "${SPIFFE_ID}" 2>/dev/null) || true
 
-# Check if already registered
-EXISTING=$(kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
-  /opt/spire/bin/spire-server entry show -spiffeID "${SPIFFE_ID}" 2>/dev/null) || true
-
-if echo "$EXISTING" | grep -q "Entry ID"; then
-  info "Proxy workload already registered:"
-  echo "$EXISTING" | head -10
-  ok "Registration exists"
-else
-  info "Registering proxy workload with SPIFFE ID: ${SPIFFE_ID}"
-  kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
-    /opt/spire/bin/spire-server entry create \
-    -spiffeID "${SPIFFE_ID}" \
-    -parentID "spiffe://${SPIRE_TRUST_DOMAIN}/agent" \
-    -selector "k8s:namespace:${PROXY_NAMESPACE}" \
-    -selector "k8s:sa:${PROXY_SERVICE_ACCOUNT}" || fail "Failed to register workload"
-  ok "Proxy workload registered"
+  if echo "$EXISTING" | grep -q "Entry ID"; then
+    skip "Proxy workload already registered"
+  else
+    info "Registering proxy workload with SPIFFE ID: ${SPIFFE_ID}"
+    kubectl -n "${SPIRE_NAMESPACE}" exec "${SPIRE_SERVER_POD}" -c spire-server -- \
+      /opt/spire/bin/spire-server entry create \
+      -spiffeID "${SPIFFE_ID}" \
+      -parentID "spiffe://${SPIRE_TRUST_DOMAIN}/agent" \
+      -selector "k8s:namespace:${PROXY_NAMESPACE}" \
+      -selector "k8s:sa:${PROXY_SERVICE_ACCOUNT}" || fail "Failed to register workload"
+    ok "Proxy workload registered"
+  fi
 fi
 
-# ─── Step 8: Tornjak access ──────────────────────────────────────
+# ─── Step 8: Tornjak access ────────────────────────────────────
 
 if [ "${ENABLE_TORNJAK}" = "true" ]; then
   step 8 "Tornjak UI Access"
@@ -178,12 +260,10 @@ echo ""
 echo -e "${GREEN}=== SPIRE Setup Complete ===${NC}"
 echo ""
 echo "What was configured:"
-echo "  1. SPIFFE Helm repo added"
-echo "  2. SPIRE CRDs installed"
-echo "  3. SPIRE server and agent deployed"
-echo "  4. Proxy workload registered (${SPIFFE_ID})"
+echo "  - SPIRE CRDs, server, and agent in ${SPIRE_NAMESPACE}"
+echo "  - Proxy workload registered as ${SPIFFE_ID}"
 if [ "${ENABLE_TORNJAK}" = "true" ]; then
-echo "  5. Tornjak UI enabled"
+echo "  - Tornjak UI enabled"
 fi
 echo ""
 echo "Next steps:"

@@ -322,27 +322,23 @@ func (h *AuthHandler) GetAuthMode(c *gin.Context) {
 			ClientID    string   `json:"client_id,omitempty"`
 			RedirectURI string   `json:"redirect_uri,omitempty"`
 			AllowedOrgs []string `json:"allowed_orgs,omitempty"`
-			AdminTeams  []string `json:"admin_teams,omitempty"`
 		}{
 			ClientID:    config.GitHub.ClientID,
 			RedirectURI: config.GitHub.RedirectURI,
 			AllowedOrgs: config.GitHub.AllowedOrgs,
-			AdminTeams:  config.GitHub.AdminTeams,
 		}
 	}
 
 	if config.Rancher != nil {
 		response.Rancher = &struct {
-			IssuerURL     string   `json:"issuer_url,omitempty"`
-			ClientID      string   `json:"client_id,omitempty"`
-			RedirectURI   string   `json:"redirect_uri,omitempty"`
-			AdminGroups   []string `json:"admin_groups,omitempty"`
-			FallbackLocal bool     `json:"fallback_local"`
+			IssuerURL     string `json:"issuer_url,omitempty"`
+			ClientID      string `json:"client_id,omitempty"`
+			RedirectURI   string `json:"redirect_uri,omitempty"`
+			FallbackLocal bool   `json:"fallback_local"`
 		}{
 			IssuerURL:     config.Rancher.IssuerURL,
 			ClientID:      config.Rancher.ClientID,
 			RedirectURI:   config.Rancher.RedirectURI,
-			AdminGroups:   config.Rancher.AdminGroups,
 			FallbackLocal: config.Rancher.FallbackLocal,
 		}
 	}
@@ -568,7 +564,7 @@ func (h *AuthHandler) parseRancherIDToken(idToken string) (*RancherUserInfo, []s
 	}
 
 	// Use configured admin groups
-	groups := h.authService.Config.Rancher.AdminGroups
+	groups := h.authService.Config.AdminGroups
 
 	return userInfo, groups, nil
 }
@@ -593,13 +589,11 @@ type AuthModeResponse struct {
 		ClientID    string   `json:"client_id,omitempty"`
 		RedirectURI string   `json:"redirect_uri,omitempty"`
 		AllowedOrgs []string `json:"allowed_orgs,omitempty"`
-		AdminTeams  []string `json:"admin_teams,omitempty"`
 	} `json:"github,omitempty"`
 	Rancher *struct {
-		IssuerURL     string   `json:"issuer_url,omitempty"`
-		ClientID      string   `json:"client_id,omitempty"`
-		RedirectURI   string   `json:"redirect_uri,omitempty"`
-		AdminGroups   []string `json:"admin_groups,omitempty"`
-		FallbackLocal bool     `json:"fallback_local"`
+		IssuerURL     string `json:"issuer_url,omitempty"`
+		ClientID      string `json:"client_id,omitempty"`
+		RedirectURI   string `json:"redirect_uri,omitempty"`
+		FallbackLocal bool   `json:"fallback_local"`
 	} `json:"rancher,omitempty"`
 }

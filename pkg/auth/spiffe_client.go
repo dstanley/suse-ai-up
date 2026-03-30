@@ -30,13 +30,21 @@ type SPIFFEClient struct {
 func NewSPIFFEClient(socketPath string) (*SPIFFEClient, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	client, err := workloadapi.New(ctx, workloadapi.WithAddr("unix://"+socketPath))
+	// Use a timeout for the initial connection to prevent blocking startup
+	// indefinitely if the SPIRE agent socket is not available
+	connectCtx, connectCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer connectCancel()
+
+	client, err := workloadapi.New(connectCtx, workloadapi.WithAddr("unix://"+socketPath))
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to connect to SPIRE agent at %s: %w", socketPath, err)
 	}
 
-	x509Source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(workloadapi.WithAddr("unix://"+socketPath)))
+	x509Ctx, x509Cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer x509Cancel()
+
+	x509Source, err := workloadapi.NewX509Source(x509Ctx, workloadapi.WithClientOptions(workloadapi.WithAddr("unix://"+socketPath)))
 	if err != nil {
 		client.Close()
 		cancel()

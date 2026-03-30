@@ -8,7 +8,10 @@ PROXY_URL="${PROXY_URL:-http://localhost:8911}"
 CURL_INSECURE="${CURL_INSECURE:--k}"
 SPIRE_NAMESPACE="${SPIRE_NAMESPACE:-spire-system}"
 SPIRE_SERVER_POD="${SPIRE_SERVER_POD:-spire-server-0}"
+PROXY_NAMESPACE="${PROXY_NAMESPACE:-suse-ai-up}"
 MOCK_SERVER_URL="${MOCK_SERVER_URL:-http://localhost:8002}"
+# In-cluster URL the proxy pod uses to reach the mock server
+MOCK_SERVER_CLUSTER_URL="${MOCK_SERVER_CLUSTER_URL:-http://spiffe-mock-server.${PROXY_NAMESPACE}.svc.cluster.local:8002}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,6 +25,19 @@ fail() { echo -e "${RED}FAIL${NC}: $1"; exit 1; }
 info() { echo -e "${YELLOW}INFO${NC}: $1"; }
 
 echo -e "${CYAN}SPIFFE/SPIRE Workload Identity${NC}"
+echo ""
+
+# Prompt for proxy URL if not set or unreachable
+if [ "$PROXY_URL" = "http://localhost:8911" ]; then
+  if ! curl -sk --max-time 3 "${PROXY_URL}/.well-known/oauth-protected-resource" &>/dev/null; then
+    echo -e "${YELLOW}PROXY_URL is not set and localhost:8911 is not reachable.${NC}"
+    read -rp "Enter the proxy URL (e.g. https://suse-ai-up.192.168.5.61.nip.io): " USER_URL
+    if [ -n "$USER_URL" ]; then
+      PROXY_URL="${USER_URL}"
+    fi
+  fi
+fi
+
 echo "Proxy: ${PROXY_URL}"
 echo ""
 
@@ -339,110 +355,276 @@ else
   fi
 fi
 
-# ─── Step 7: Token Exchange with Mock Server ─────────────────────
+# ─── Step 7: Register SPIFFE Adapter ─────────────────────────────
 
-step 7 "RFC 8693 Token Exchange"
+step 7 "Register SPIFFE Adapter with Proxy"
 
-# Check if mock server is running
-MOCK_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "${MOCK_SERVER_URL}/health" 2>/dev/null) || true
+# Check proxy connectivity
+PROXY_HEALTH=$(curl ${CURL_INSECURE} -s -o /dev/null -w "%{http_code}" "${PROXY_URL}/health" 2>/dev/null) || true
 
-if [ "$MOCK_HEALTH" != "200" ]; then
-  info "Mock server not running at ${MOCK_SERVER_URL}"
-  info "Start it with: docker compose up -d (from this directory)"
-  info "Or:            python3 mock-server/server.py &"
-  echo ""
-  info "Skipping live token exchange — showing what would happen:"
-  echo ""
-  echo "  1. POST ${MOCK_SERVER_URL}/token"
-  echo "     grant_type=urn:ietf:params:oauth:token-type:token-exchange"
-  echo "     subject_token=<jwt-svid>"
-  echo "     subject_token_type=urn:ietf:params:oauth:token-type:jwt"
-  echo "     audience=https://databricks.example.com"
-  echo ""
-  echo "  2. Receive bearer token from token exchange"
-  echo ""
-  echo "  3. POST ${MOCK_SERVER_URL}/mcp"
-  echo "     Authorization: Bearer <exchanged-token>"
-  echo "     {\"jsonrpc\": \"2.0\", \"method\": \"tools/call\", ...}"
-  echo ""
-  info "Set MOCK_SERVER_URL to override (default: http://localhost:8002)"
+if [ "$PROXY_HEALTH" = "000" ]; then
+  echo -e "${RED}FAIL${NC}: Cannot connect to proxy at ${PROXY_URL}" >&2
+  info "Export PROXY_URL to override (e.g. export PROXY_URL=https://proxy.example.com:8911)"
+  PROXY_AVAILABLE=false
+elif [ "$PROXY_HEALTH" != "200" ]; then
+  echo -e "${RED}FAIL${NC}: Proxy returned HTTP ${PROXY_HEALTH}" >&2
+  PROXY_AVAILABLE=false
 else
-  ok "Mock server is running at ${MOCK_SERVER_URL}"
-  echo ""
+  ok "Proxy is reachable at ${PROXY_URL}"
+  PROXY_AVAILABLE=true
+fi
 
-  # Use the minted JWT SVID if available, otherwise create a synthetic one
-  if [ -z "${JWT_SVID:-}" ]; then
-    info "No live JWT SVID available — creating a synthetic one for demo"
-    # Create a minimal JWT with SPIFFE claims (header.payload.signature)
-    JWT_HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64 | tr -d '=' | tr '/+' '_-')
-    JWT_CLAIMS=$(echo -n "{\"sub\":\"spiffe://marv.suse-ai.com/suse-ai-up\",\"aud\":[\"https://databricks.example.com\"],\"iss\":\"spire-server\",\"exp\":$(($(date +%s) + 3600))}" | base64 | tr -d '=' | tr '/+' '_-')
-    JWT_SVID="${JWT_HEADER}.${JWT_CLAIMS}.mock-signature"
-    info "Synthetic SPIFFE ID: spiffe://marv.suse-ai.com/suse-ai-up"
-  fi
+# Deploy mock server into the cluster if kubectl is available
+MOCK_AVAILABLE=false
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-  # ── Step 7a: Exchange JWT SVID for bearer token ──
-  info "Exchanging JWT SVID at mock token endpoint..."
-  echo ""
-  echo "  POST ${MOCK_SERVER_URL}/token"
-  echo "  grant_type=urn:ietf:params:oauth:token-type:token-exchange"
-  echo "  subject_token=<jwt-svid> (${#JWT_SVID} chars)"
-  echo "  subject_token_type=urn:ietf:params:oauth:token-type:jwt"
-  echo ""
+if command -v kubectl &>/dev/null; then
+  # Check if mock server is already running in-cluster
+  MOCK_POD=$(kubectl -n "${PROXY_NAMESPACE}" get pods -l app=spiffe-mock-server --no-headers 2>/dev/null | grep Running) || true
 
-  TOKEN_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "grant_type=urn:ietf:params:oauth:token-type:token-exchange&subject_token=${JWT_SVID}&subject_token_type=urn:ietf:params:oauth:token-type:jwt&audience=https://databricks.example.com&scope=sql:read" 2>&1) || true
+  if [ -z "$MOCK_POD" ]; then
+    info "Deploying mock server into ${PROXY_NAMESPACE} namespace..."
 
-  if echo "$TOKEN_RESPONSE" | jq -e '.access_token' &>/dev/null; then
-    BEARER_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
-    TOKEN_TYPE=$(echo "$TOKEN_RESPONSE" | jq -r '.token_type')
-    EXPIRES_IN=$(echo "$TOKEN_RESPONSE" | jq -r '.expires_in')
-    ISSUED_TYPE=$(echo "$TOKEN_RESPONSE" | jq -r '.issued_token_type')
+    # Create ConfigMap from server.py
+    kubectl -n "${PROXY_NAMESPACE}" create configmap spiffe-mock-server \
+      --from-file=server.py="${SCRIPT_DIR}/mock-server/server.py" \
+      --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null
 
-    info "Token exchange response:"
-    echo "$TOKEN_RESPONSE" | jq .
-    echo ""
-    ok "Received ${TOKEN_TYPE} token (expires in ${EXPIRES_IN}s)"
-    ok "Issued token type: ${ISSUED_TYPE}"
+    # Deploy the mock server
+    kubectl -n "${PROXY_NAMESPACE}" apply -f "${SCRIPT_DIR}/mock-server/k8s.yaml" 2>/dev/null
+
+    # Wait for it to be ready
+    info "Waiting for mock server pod to be ready..."
+    if kubectl -n "${PROXY_NAMESPACE}" wait --for=condition=ready pod -l app=spiffe-mock-server --timeout=60s 2>/dev/null; then
+      ok "Mock server deployed in-cluster"
+      MOCK_AVAILABLE=true
+    else
+      info "Mock server pod not ready yet — check: kubectl get pods -n ${PROXY_NAMESPACE} -l app=spiffe-mock-server"
+    fi
   else
-    echo -e "${RED}FAIL${NC}: Token exchange failed: ${TOKEN_RESPONSE:-no response}" >&2
-    BEARER_TOKEN=""
+    ok "Mock server already running in-cluster"
+    MOCK_AVAILABLE=true
+  fi
+else
+  info "kubectl not available — checking for local mock server"
+fi
+
+# Fall back to local mock server if not in-cluster
+if [ "$MOCK_AVAILABLE" != "true" ]; then
+  MOCK_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "${MOCK_SERVER_URL}/health" 2>/dev/null) || true
+  if [ "$MOCK_HEALTH" = "200" ]; then
+    ok "Mock server running locally at ${MOCK_SERVER_URL}"
+    MOCK_AVAILABLE=true
+    # Local mock — proxy can't reach localhost, so override cluster URL
+    info "Note: proxy may not reach ${MOCK_SERVER_URL} from in-cluster"
+  else
+    info "Mock server not running locally either"
+    info "Start with: docker compose up -d  OR  python3 mock-server/server.py &"
   fi
 fi
 
-# ─── Step 8: Call Mock MCP Server ────────────────────────────────
-
-step 8 "MCP Tool Call with Exchanged Token"
-
-if [ -z "${BEARER_TOKEN:-}" ]; then
-  info "No bearer token available — skipping MCP call"
-  info "Run with mock server to see the full flow"
+# Set up auth header for proxy API calls
+if [ -n "${AUTH_TOKEN:-}" ]; then
+  AUTH_HEADER="Authorization: Bearer ${AUTH_TOKEN}"
 else
-  # ── 8a: List available tools ──
-  info "Listing available MCP tools..."
+  # Try to obtain a token automatically via Rancher OIDC
+  info "No AUTH_TOKEN set — attempting automatic token generation..."
+  AUTO_TOKEN=$(PROXY_URL="${PROXY_URL}" CURL_INSECURE="${CURL_INSECURE}" "${SCRIPT_DIR}/get-token.sh" 2>/dev/null) || true
+  if [ -n "$AUTO_TOKEN" ]; then
+    AUTH_TOKEN="$AUTO_TOKEN"
+    AUTH_HEADER="Authorization: Bearer ${AUTH_TOKEN}"
+    ok "OAuth token obtained automatically"
+  else
+    AUTH_HEADER="X-User-ID: admin"
+    info "Could not obtain token automatically — using dev-mode auth"
+    info "For OAuth: export AUTH_TOKEN=\$(./get-token.sh)"
+  fi
+fi
+
+if [ "$PROXY_AVAILABLE" = "true" ] && [ "$MOCK_AVAILABLE" = "true" ]; then
+  echo ""
+  info "Registering MCP server and SPIFFE adapter with proxy..."
+  info "Proxy will reach mock server at: ${MOCK_SERVER_CLUSTER_URL}"
   echo ""
 
-  TOOLS_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/mcp" \
+  # Step 1: Register the MCP server in the registry
+  info "Registering MCP server in proxy registry..."
+  SERVER_REG=$(curl ${CURL_INSECURE} -s -X POST "${PROXY_URL}/api/v1/registry/upload" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${BEARER_TOKEN}" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>&1) || true
+    -H "${AUTH_HEADER}" \
+    -d "{
+      \"id\": \"databricks-spiffe\",
+      \"name\": \"databricks-spiffe\",
+      \"type\": \"server\",
+      \"url\": \"${MOCK_SERVER_CLUSTER_URL}/mcp\",
+      \"about\": {
+        \"title\": \"Databricks (SPIFFE)\",
+        \"description\": \"Mock Databricks MCP server for SPIFFE demo\"
+      },
+      \"packages\": [{
+        \"transport\": {
+          \"type\": \"http\",
+          \"url\": \"${MOCK_SERVER_CLUSTER_URL}/mcp\"
+        }
+      }]
+    }" 2>&1) || true
 
-  if echo "$TOOLS_RESPONSE" | jq -e '.result.tools' &>/dev/null; then
-    TOOL_COUNT=$(echo "$TOOLS_RESPONSE" | jq '.result.tools | length')
-    echo "$TOOLS_RESPONSE" | jq '.result.tools[] | {name, description}'
-    echo ""
-    ok "${TOOL_COUNT} tools available via SPIFFE-authenticated connection"
+  if echo "$SERVER_REG" | jq -e '.id // .name' &>/dev/null; then
+    ok "MCP server registered: databricks-spiffe"
+  else
+    if echo "$SERVER_REG" | grep -qi "already exists\|duplicate\|conflict"; then
+      ok "MCP server databricks-spiffe already registered"
+    else
+      info "Server registration response: ${SERVER_REG:-no response}"
+    fi
   fi
 
-  # ── 8b: Execute a SQL query ──
+  # Step 2: Create the adapter
+  info "Example adapter configuration:"
   echo ""
-  info "Calling execute_sql tool via MCP..."
+  cat <<JSON
+{
+  "mcpServerId": "databricks-spiffe",
+  "name": "databricks_spiffe",
+  "remoteUrl": "${MOCK_SERVER_CLUSTER_URL}/mcp",
+  "connectionType": "remote-http",
+  "authentication": {
+    "required": true,
+    "type": "spiffe",
+    "spiffe": {
+      "target_audience": "https://databricks.example.com",
+      "use_mtls": false
+    },
+    "tokenExchange": {
+      "token_endpoint": "${MOCK_SERVER_CLUSTER_URL}/token",
+      "audience": "https://databricks.example.com",
+      "scopes": ["sql:read"],
+      "subject_token_type": "urn:ietf:params:oauth:token-type:jwt"
+    }
+  }
+}
+JSON
   echo ""
 
-  SQL_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/mcp" \
+  # Delete any existing adapter with this name (stale data from previous runs)
+  curl ${CURL_INSECURE} -s -X DELETE "${PROXY_URL}/api/v1/adapters/databricks_spiffe" \
+    -H "${AUTH_HEADER}" &>/dev/null || true
+
+  info "Creating SPIFFE adapter..."
+  REG_RESULT=$(curl ${CURL_INSECURE} -s -X POST "${PROXY_URL}/api/v1/adapters" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${BEARER_TOKEN}" \
-    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute_sql","arguments":{"query":"SELECT * FROM sensor_data LIMIT 3"}}}' 2>&1) || true
+    -H "${AUTH_HEADER}" \
+    -d "{
+      \"mcpServerId\": \"databricks-spiffe\",
+      \"name\": \"databricks_spiffe\",
+      \"remoteUrl\": \"${MOCK_SERVER_CLUSTER_URL}/mcp\",
+      \"connectionType\": \"remote-http\",
+      \"authentication\": {
+        \"required\": true,
+        \"type\": \"spiffe\",
+        \"spiffe\": {
+          \"target_audience\": \"https://databricks.example.com\",
+          \"use_mtls\": false
+        },
+        \"tokenExchange\": {
+          \"token_endpoint\": \"${MOCK_SERVER_CLUSTER_URL}/token\",
+          \"audience\": \"https://databricks.example.com\",
+          \"scopes\": [\"sql:read\"],
+          \"subject_token_type\": \"urn:ietf:params:oauth:token-type:jwt\"
+        }
+      }
+    }" 2>&1) || true
+
+  if echo "$REG_RESULT" | jq -e '.id // .name' &>/dev/null; then
+    ok "Adapter registered: databricks_spiffe"
+    echo "$REG_RESULT" | jq '{id, name: (.name // .id), status: (.status // "registered")}' 2>/dev/null || true
+  else
+    # May already exist — that's fine
+    if echo "$REG_RESULT" | grep -qi "already exists\|duplicate\|conflict"; then
+      ok "Adapter databricks_spiffe already registered"
+    else
+      echo -e "${RED}FAIL${NC}: Could not register adapter: ${REG_RESULT:-no response}" >&2
+    fi
+  fi
+else
+  echo ""
+  if [ "$PROXY_AVAILABLE" != "true" ]; then
+    info "Proxy not available — skipping adapter registration"
+  fi
+  if [ "$MOCK_AVAILABLE" != "true" ]; then
+    info "Mock server not available — skipping adapter registration"
+  fi
+fi
+
+# ─── Step 8: End-to-End MCP via Proxy ────────────────────────────
+
+step 8 "MCP Tool Calls via Proxy (SPIFFE Auth)"
+
+if [ "$PROXY_AVAILABLE" = "true" ] && [ "$MOCK_AVAILABLE" = "true" ]; then
+
+  cat <<'FLOW'
+End-to-end flow for each request:
+
+  Client                    Proxy                     SPIRE Agent         Mock Server
+    |                         |                           |                   |
+    |-- POST /api/v1/mcp ---->|                           |                   |
+    |   (Bearer: OAuth JWT)   |-- FetchJWTSVID() -------->|                   |
+    |                         |<-- JWT SVID --------------|                   |
+    |                         |                                               |
+    |                         |-- POST /token (RFC 8693) -------------------->|
+    |                         |   subject_token=<jwt-svid>                    |
+    |                         |<-- access_token ------------------------------|
+    |                         |                                               |
+    |                         |-- POST /mcp (Bearer: exchanged token) ------->|
+    |                         |<-- tool result --------------------------------|
+    |<-- tool result ---------|
+FLOW
+  echo ""
+
+  # ── 8a: List tools through the proxy ──
+  info "Listing tools through the proxy's unified endpoint..."
+  echo ""
+  echo "  POST ${PROXY_URL}/api/v1/mcp"
+  echo "  Authorization: Bearer <oauth-token>"
+  echo "  {\"method\": \"tools/list\"}"
+  echo ""
+
+  TOOLS_RESPONSE=$(curl ${CURL_INSECURE} -s -X POST "${PROXY_URL}/api/v1/mcp" \
+    -H "Content-Type: application/json" \
+    -H "${AUTH_HEADER}" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' 2>&1) || true
+
+  if echo "$TOOLS_RESPONSE" | jq -e '.result.tools' &>/dev/null; then
+    # Filter to just the SPIFFE adapter tools
+    SPIFFE_TOOLS=$(echo "$TOOLS_RESPONSE" | jq '[.result.tools[] | select(.name | startswith("databricks_spiffe__"))]')
+    TOOL_COUNT=$(echo "$SPIFFE_TOOLS" | jq 'length')
+
+    if [ "$TOOL_COUNT" -gt 0 ]; then
+      echo "$SPIFFE_TOOLS" | jq '.[] | {name, description}'
+      echo ""
+      ok "${TOOL_COUNT} tools available via databricks_spiffe adapter"
+      info "Tool names are prefixed with adapter name (databricks_spiffe__)"
+    else
+      info "No databricks_spiffe tools found in tools/list response"
+      info "The adapter may still be initializing — tools appear after first connection"
+      echo "$TOOLS_RESPONSE" | jq '.result.tools[0:3] | .[] | {name}' 2>/dev/null || true
+    fi
+  else
+    echo -e "${RED}FAIL${NC}: tools/list failed: $(echo "$TOOLS_RESPONSE" | jq -r '.error.message // .error // "unknown"' 2>/dev/null)" >&2
+  fi
+
+  # ── 8b: Execute SQL query through the proxy ──
+  echo ""
+  info "Calling databricks_spiffe__execute_sql through the proxy..."
+  echo ""
+  echo "  POST ${PROXY_URL}/api/v1/mcp"
+  echo "  {\"method\": \"tools/call\", \"params\": {\"name\": \"databricks_spiffe__execute_sql\", ...}}"
+  echo ""
+
+  SQL_RESPONSE=$(curl ${CURL_INSECURE} -s -X POST "${PROXY_URL}/api/v1/mcp" \
+    -H "Content-Type: application/json" \
+    -H "${AUTH_HEADER}" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"databricks_spiffe__execute_sql","arguments":{"query":"SELECT * FROM sensor_data LIMIT 3"}}}' 2>&1) || true
 
   if echo "$SQL_RESPONSE" | jq -e '.result.content[0].text' &>/dev/null; then
     RESULT_TEXT=$(echo "$SQL_RESPONSE" | jq -r '.result.content[0].text')
@@ -452,27 +634,60 @@ else
     AUTH_VIA=$(echo "$RESULT_TEXT" | jq -r '.authenticated_via // empty')
     WORKLOAD_ID=$(echo "$RESULT_TEXT" | jq -r '.workload_identity // empty')
     ok "Query executed successfully"
-    ok "Authenticated via: ${AUTH_VIA}"
-    ok "Workload identity: ${WORKLOAD_ID}"
+    if [ -n "$AUTH_VIA" ]; then
+      ok "Authenticated via: ${AUTH_VIA}"
+    fi
+    if [ -n "$WORKLOAD_ID" ]; then
+      ok "Workload identity: ${WORKLOAD_ID}"
+    fi
+    echo ""
+    ok "Request went: Client -> Proxy (OAuth) -> SPIRE (JWT SVID) -> Token Exchange -> Mock MCP"
   else
-    echo -e "${RED}FAIL${NC}: MCP call failed: ${SQL_RESPONSE:-no response}" >&2
+    echo -e "${RED}FAIL${NC}: tools/call failed: $(echo "$SQL_RESPONSE" | jq -r '.error.message // .error // "unknown"' 2>/dev/null)" >&2
+    info "Full response:"
+    echo "$SQL_RESPONSE" | jq . 2>/dev/null || echo "$SQL_RESPONSE"
   fi
 
-  # ── 8c: Get workspace info ──
+  # ── 8c: Get workspace info through the proxy ──
   echo ""
-  info "Calling get_workspace_info tool..."
+  info "Calling databricks_spiffe__get_workspace_info through the proxy..."
   echo ""
 
-  WS_RESPONSE=$(curl -s -X POST "${MOCK_SERVER_URL}/mcp" \
+  WS_RESPONSE=$(curl ${CURL_INSECURE} -s -X POST "${PROXY_URL}/api/v1/mcp" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${BEARER_TOKEN}" \
-    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_workspace_info","arguments":{}}}' 2>&1) || true
+    -H "${AUTH_HEADER}" \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"databricks_spiffe__get_workspace_info","arguments":{}}}' 2>&1) || true
 
   if echo "$WS_RESPONSE" | jq -e '.result.content[0].text' &>/dev/null; then
     echo "$WS_RESPONSE" | jq -r '.result.content[0].text' | jq .
     echo ""
-    ok "Workspace info retrieved with workload identity"
+    ok "Workspace info retrieved via SPIFFE workload identity"
+  else
+    echo -e "${RED}FAIL${NC}: tools/call failed: $(echo "$WS_RESPONSE" | jq -r '.error.message // .error // "unknown"' 2>/dev/null)" >&2
   fi
+
+else
+  info "Proxy or mock server not available — showing what the flow looks like:"
+  echo ""
+  cat <<'FLOW'
+With proxy + mock server running, Step 8 would:
+
+  1. POST ${PROXY_URL}/api/v1/mcp  (tools/list)
+     → Proxy aggregates tools from all adapters including databricks_spiffe
+     → Returns: databricks_spiffe__execute_sql, databricks_spiffe__get_cluster_status, etc.
+
+  2. POST ${PROXY_URL}/api/v1/mcp  (tools/call: databricks_spiffe__execute_sql)
+     → Proxy strips prefix, routes to databricks_spiffe adapter
+     → Proxy fetches JWT SVID from SPIRE agent (workload identity)
+     → Proxy exchanges SVID at mock /token endpoint (RFC 8693)
+     → Proxy calls mock /mcp with exchanged bearer token
+     → Returns: query results with authenticated_via=spiffe_token_exchange
+
+Prerequisites:
+  - Proxy running with SPIFFE enabled:  helm upgrade ... --set spiffe.enabled=true
+  - Mock server deployed (demo auto-deploys to cluster, or: docker compose up -d)
+  - OAuth token from demo 02:           export AUTH_TOKEN=<token>
+FLOW
 fi
 
 # ─── Step 9: Auth Strategy Comparison ─────────────────────────────
@@ -506,12 +721,12 @@ echo "  2. mTLS mode — certificate-based transport authentication"
 echo "  3. SPIRE Agent Workload API interaction"
 echo "  4. Live cluster verification (pods, health, entries, agents)"
 echo "  5. JWT SVID minting from SPIRE server"
-echo "  6. RFC 8693 token exchange (JWT SVID -> bearer token)"
-echo "  7. MCP tool calls authenticated via exchanged workload token"
+echo "  6. SPIFFE adapter registration on the proxy"
+echo "  7. MCP tool calls routed through the proxy with SPIFFE auth"
 echo "  8. Comparison of all three auth strategies"
 echo ""
 echo "End-to-end flow:"
-echo "  SPIRE Agent -> JWT SVID -> Token Exchange -> Bearer Token -> MCP Server"
+echo "  Client -> Proxy (OAuth) -> SPIRE Agent (JWT SVID) -> Token Exchange -> MCP Server"
 echo ""
 echo "SPIFFE is best suited for:"
 echo "  - Zero-trust service mesh environments"

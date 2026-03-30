@@ -177,36 +177,55 @@ func (uas *UserAuthService) generateUserID(provider models.UserAuthProvider, ext
 	return fmt.Sprintf("%s_%s", provider, strings.ReplaceAll(externalID, "-", "_"))
 }
 
-// mapExternalGroupsToLocal maps external groups to local groups
+// mapExternalGroupsToLocal maps external groups to local groups using
+// the provider-agnostic AIPROXY_ADMIN_GROUPS list. Uses substring matching
+// so "my-team" matches "org/my-team" (GitHub team format).
 func (uas *UserAuthService) mapExternalGroupsToLocal(provider models.UserAuthProvider, externalGroups []string) []string {
 	localGroups := []string{"mcp-users"} // Default group
 
-	switch provider {
-	case models.UserAuthProviderGitHub:
-		if uas.Config.GitHub != nil {
-			for _, team := range uas.Config.GitHub.AdminTeams {
-				for _, extGroup := range externalGroups {
-					if strings.Contains(extGroup, team) {
-						localGroups = append(localGroups, "mcp-admins")
-						break
-					}
-				}
-			}
-		}
-	case models.UserAuthProviderRancher:
-		if uas.Config.Rancher != nil {
-			for _, adminGroup := range uas.Config.Rancher.AdminGroups {
-				for _, extGroup := range externalGroups {
-					if extGroup == adminGroup {
-						localGroups = append(localGroups, "mcp-admins")
-						break
-					}
-				}
+	for _, adminGroup := range uas.Config.AdminGroups {
+		for _, extGroup := range externalGroups {
+			if strings.Contains(extGroup, adminGroup) {
+				localGroups = append(localGroups, "mcp-admins")
+				return localGroups // Only add once
 			}
 		}
 	}
 
 	return localGroups
+}
+
+// MapExternalGroups maps external provider groups to local groups.
+func (uas *UserAuthService) MapExternalGroups(provider models.UserAuthProvider, externalGroups []string) []string {
+	return uas.mapExternalGroupsToLocal(provider, externalGroups)
+}
+
+// ProvisionExternalUser creates or updates a user with an explicit ID.
+// This is used when the caller controls the user ID (e.g. OAuth sub claim).
+func (uas *UserAuthService) ProvisionExternalUser(ctx context.Context, id, name, email, authProvider, externalID string, providerGroups, localGroups []string) error {
+	existing, err := uas.UserStore.Get(ctx, id)
+	if err == nil {
+		// Update existing user
+		existing.Name = name
+		existing.Email = email
+		existing.ProviderGroups = providerGroups
+		existing.Groups = localGroups
+		now := time.Now().UTC()
+		existing.LastLoginAt = &now
+		return uas.UserStore.Update(ctx, *existing)
+	}
+
+	// Create new user
+	user := models.User{
+		ID:             id,
+		Name:           name,
+		Email:          email,
+		AuthProvider:   authProvider,
+		ExternalID:     externalID,
+		ProviderGroups: providerGroups,
+		Groups:         localGroups,
+	}
+	return uas.UserStore.Create(ctx, user)
 }
 
 // UserAuthMiddleware creates Gin middleware for user authentication
@@ -267,6 +286,7 @@ func UserAuthMiddleware(authService *UserAuthService) gin.HandlerFunc {
 		}
 
 		c.Set("user", user)
+		c.Request.Header.Set("X-User-ID", user.ID)
 		c.Next()
 	}
 }

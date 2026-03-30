@@ -51,25 +51,25 @@ type Config struct {
 	LocalDeployment LocalDeploymentConfig `json:"local_deployment"`
 
 	// Authentication
-	AuthMode            string `json:"auth_mode"`
-	DevMode             bool   `json:"dev_mode"`
-	AdminPassword       string `json:"admin_password"`
-	ForcePasswordChange bool   `json:"force_password_change"`
-	PasswordMinLength   int    `json:"password_min_length"`
+	AuthMode            string   `json:"auth_mode"`
+	DevMode             bool     `json:"dev_mode"`
+	AdminPassword       string   `json:"admin_password"`
+	ForcePasswordChange bool     `json:"force_password_change"`
+	PasswordMinLength   int      `json:"password_min_length"`
+	AdminUsers          []string `json:"admin_users"`  // External user IDs that get mcp-admins
+	AdminGroups         []string `json:"admin_groups"` // External group names that get mcp-admins
 
 	// GitHub OAuth
 	GitHubClientID     string   `json:"github_client_id"`
 	GitHubClientSecret string   `json:"github_client_secret"`
 	GitHubRedirectURI  string   `json:"github_redirect_uri"`
 	GitHubAllowedOrgs  []string `json:"github_allowed_orgs"`
-	GitHubAdminTeams   []string `json:"github_admin_teams"`
 
 	// Rancher OIDC
 	RancherIssuerURL     string   `json:"rancher_issuer_url"`
 	RancherClientID      string   `json:"rancher_client_id"`
 	RancherClientSecret  string   `json:"rancher_client_secret"`
 	RancherRedirectURI   string   `json:"rancher_redirect_uri"`
-	RancherAdminGroups   []string `json:"rancher_admin_groups"`
 	RancherFallbackLocal bool     `json:"rancher_fallback_local"`
 	RancherTLSSkipVerify bool     `json:"rancher_tls_skip_verify"`
 
@@ -187,20 +187,20 @@ func LoadConfig() *Config {
 		AdminPassword:       getEnv("ADMIN_PASSWORD", "admin"),
 		ForcePasswordChange: getEnvBool("FORCE_PASSWORD_CHANGE", true),
 		PasswordMinLength:   getEnvInt("PASSWORD_MIN_LENGTH", 8),
+		AdminUsers:          parseStringSlice(getEnv("AIPROXY_ADMIN_USERS", "")),
+		AdminGroups:         parseStringSlice(getEnv("AIPROXY_ADMIN_GROUPS", "")),
 
 		// GitHub OAuth
 		GitHubClientID:     getEnv("GITHUB_CLIENT_ID", ""),
 		GitHubClientSecret: getEnv("GITHUB_CLIENT_SECRET", ""),
 		GitHubRedirectURI:  getEnv("GITHUB_REDIRECT_URI", ""),
 		GitHubAllowedOrgs:  parseStringSlice(getEnv("GITHUB_ALLOWED_ORGS", "")),
-		GitHubAdminTeams:   parseStringSlice(getEnv("GITHUB_ADMIN_TEAMS", "")),
 
 		// Rancher OIDC
 		RancherIssuerURL:     getEnv("RANCHER_ISSUER_URL", ""),
 		RancherClientID:      getEnv("RANCHER_CLIENT_ID", ""),
 		RancherClientSecret:  getEnv("RANCHER_CLIENT_SECRET", ""),
 		RancherRedirectURI:   getEnv("RANCHER_REDIRECT_URI", ""),
-		RancherAdminGroups:   parseStringSlice(getEnv("RANCHER_ADMIN_GROUPS", "")),
 		RancherFallbackLocal: getEnvBool("RANCHER_FALLBACK_LOCAL", true),
 		RancherTLSSkipVerify: getEnvBool("RANCHER_TLS_SKIP_VERIFY", false),
 

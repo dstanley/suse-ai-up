@@ -141,6 +141,21 @@ questions:
   group: "Users"
   show_if: "auth.mode=dev"
 
+# Admin User/Group Mapping (all providers)
+- variable: auth.adminUsers
+  label: "Admin User IDs"
+  description: "Comma-separated list of external user IDs granted admin on login (e.g., user-286n2)"
+  type: string
+  default: ""
+  group: "Users"
+
+- variable: auth.adminGroups
+  label: "Admin Groups"
+  description: "Comma-separated list of external group names granted admin on login (substring match)"
+  type: string
+  default: ""
+  group: "Users"
+
 # Local Authentication Configuration
 - variable: auth.local.defaultAdminPassword
   label: "Admin Password"
@@ -204,14 +219,6 @@ questions:
   group: "Users"
   show_if: "auth.mode=github"
 
-- variable: auth.github.adminTeams
-  label: "Admin Teams"
-  description: "Comma-separated list of GitHub teams that get admin permissions"
-  type: string
-  default: ""
-  group: "Users"
-  show_if: "auth.mode=github"
-
 # Rancher OIDC Configuration
 - variable: auth.rancher.issuerUrl
   label: "Rancher Issuer URL"
@@ -243,14 +250,6 @@ questions:
 - variable: auth.rancher.redirectUri
   label: "Rancher Redirect URI"
   description: "OIDC callback URL (auto-generated if empty)"
-  type: string
-  default: ""
-  group: "Users"
-  show_if: "auth.mode=rancher"
-
-- variable: auth.rancher.adminGroups
-  label: "Admin Groups"
-  description: "Comma-separated list of Rancher groups that get admin permissions"
   type: string
   default: ""
   group: "Users"

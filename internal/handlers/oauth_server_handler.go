@@ -22,18 +22,20 @@ import (
 
 // OAuthServerHandler handles all OAuth 2.1 AS endpoints.
 type OAuthServerHandler struct {
-	oauthService *service.OAuthServerService
-	auditLogger  *auth.AuditLogger
-	cfg          *config.Config
-	policyStore  clients.AuthPolicyStore
+	oauthService    *service.OAuthServerService
+	userAuthService *auth.UserAuthService
+	auditLogger     *auth.AuditLogger
+	cfg             *config.Config
+	policyStore     clients.AuthPolicyStore
 }
 
 // NewOAuthServerHandler creates a new OAuth server handler.
-func NewOAuthServerHandler(oauthService *service.OAuthServerService, auditLogger *auth.AuditLogger, cfg *config.Config) *OAuthServerHandler {
+func NewOAuthServerHandler(oauthService *service.OAuthServerService, userAuthService *auth.UserAuthService, auditLogger *auth.AuditLogger, cfg *config.Config) *OAuthServerHandler {
 	return &OAuthServerHandler{
-		oauthService: oauthService,
-		auditLogger:  auditLogger,
-		cfg:          cfg,
+		oauthService:    oauthService,
+		userAuthService: userAuthService,
+		auditLogger:     auditLogger,
+		cfg:             cfg,
 	}
 }
 
@@ -311,6 +313,54 @@ func (h *OAuthServerHandler) Callback(c *gin.Context) {
 		})
 		redirectWithError(c, clientRedirectURI, "server_error", "Failed to authenticate with identity provider", state)
 		return
+	}
+
+	// Provision or update the user in the local store so that permission
+	// checks (CanManageGroups, ListAdapters, etc.) can resolve the user.
+	// We use the Rancher sub claim directly as the user ID to match the
+	// OAuth access token's sub claim.
+	if h.userAuthService != nil {
+		username, _ := userClaims["username"].(string)
+		email, _ := userClaims["email"].(string)
+		var groups []string
+		if g, ok := userClaims["groups"].([]interface{}); ok {
+			for _, v := range g {
+				if s, ok := v.(string); ok {
+					groups = append(groups, s)
+				}
+			}
+		} else if g, ok := userClaims["groups"].([]string); ok {
+			groups = g
+		}
+		localGroups := h.userAuthService.MapExternalGroups(models.UserAuthProviderRancher, groups)
+		// Check if this user ID is in the admin users list
+		for _, adminUser := range h.cfg.AdminUsers {
+			if adminUser == userID {
+				hasAdmin := false
+				for _, g := range localGroups {
+					if g == "mcp-admins" {
+						hasAdmin = true
+						break
+					}
+				}
+				if !hasAdmin {
+					localGroups = append(localGroups, "mcp-admins")
+				}
+				break
+			}
+		}
+		if err := h.userAuthService.ProvisionExternalUser(
+			c.Request.Context(),
+			userID, // Use Rancher sub directly — must match OAuth token sub
+			username,
+			email,
+			string(models.UserAuthProviderRancher),
+			userID, // externalID
+			groups,
+			localGroups,
+		); err != nil {
+			fmt.Printf("Warning: failed to provision Rancher user %s: %v\n", userID, err)
+		}
 	}
 
 	// Parse scopes

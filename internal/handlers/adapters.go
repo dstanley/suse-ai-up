@@ -249,6 +249,17 @@ func (h *AdapterHandler) CreateAdapter(w http.ResponseWriter, r *http.Request) {
 		userID = "default-user" // For development
 	}
 
+	// Adapter creation requires adapter:create permission (admin-only)
+	if h.userGroupService != nil {
+		canCreate, err := h.userGroupService.CanCreateAdapters(r.Context(), userID)
+		if err != nil || !canCreate {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Admin permission required to create adapters"})
+			return
+		}
+	}
+
 	// Handle Trento-specific configuration
 	if req.MCPServerID == "suse-trento" {
 		if trentoConfig, exists := req.EnvironmentVariables["TRENTO_CONFIG"]; exists && trentoConfig != "" {
@@ -563,6 +574,17 @@ func (h *AdapterHandler) DeleteAdapter(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
 		userID = "default-user"
+	}
+
+	// Adapter deletion requires adapter:delete permission (admin-only)
+	if h.userGroupService != nil {
+		user, err := h.userGroupService.GetUser(r.Context(), userID)
+		if err != nil || !h.userGroupService.HasPermission(user.Groups, "adapter:delete") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "Admin permission required to delete adapters"})
+			return
+		}
 	}
 
 	// Note: Sidecar cleanup is handled automatically by the adapter service

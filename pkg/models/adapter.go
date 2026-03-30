@@ -414,11 +414,12 @@ const (
 
 // UserAuthConfig represents the complete authentication configuration
 type UserAuthConfig struct {
-	Mode    string             `json:"mode"`     // "local", "github", "rancher", "dev"
-	DevMode bool               `json:"dev_mode"` // Bypass authentication in dev
-	Local   *LocalAuthConfig   `json:"local,omitempty"`
-	GitHub  *GitHubAuthConfig  `json:"github,omitempty"`
-	Rancher *RancherAuthConfig `json:"rancher,omitempty"`
+	Mode        string             `json:"mode"`          // "local", "github", "rancher", "dev"
+	DevMode     bool               `json:"dev_mode"`      // Bypass authentication in dev
+	AdminGroups []string           `json:"admin_groups"`  // External groups that map to mcp-admins
+	Local       *LocalAuthConfig   `json:"local,omitempty"`
+	GitHub      *GitHubAuthConfig  `json:"github,omitempty"`
+	Rancher     *RancherAuthConfig `json:"rancher,omitempty"`
 }
 
 // LocalAuthConfig represents local password authentication configuration
@@ -434,17 +435,15 @@ type GitHubAuthConfig struct {
 	ClientSecret string   `json:"client_secret"`
 	RedirectURI  string   `json:"redirect_uri"`
 	AllowedOrgs  []string `json:"allowed_orgs,omitempty"`
-	AdminTeams   []string `json:"admin_teams,omitempty"`
 }
 
 // RancherAuthConfig represents Rancher OIDC configuration
 type RancherAuthConfig struct {
-	IssuerURL     string   `json:"issuer_url"`
-	ClientID      string   `json:"client_id"`
-	ClientSecret  string   `json:"client_secret"`
-	RedirectURI   string   `json:"redirect_uri"`
-	AdminGroups   []string `json:"admin_groups"`
-	FallbackLocal bool     `json:"fallback_local"`
+	IssuerURL     string `json:"issuer_url"`
+	ClientID      string `json:"client_id"`
+	ClientSecret  string `json:"client_secret"`
+	RedirectURI   string `json:"redirect_uri"`
+	FallbackLocal bool   `json:"fallback_local"`
 }
 
 // AuthToken represents a JWT token for user authentication

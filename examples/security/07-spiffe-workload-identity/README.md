@@ -27,15 +27,11 @@ cp .env.example .env
 source .env
 ./setup.sh
 
-# 3. Start the mock server for end-to-end token exchange
-docker compose up -d
-# Or without Docker: python3 mock-server/server.py &
-
-# 4. Run the demo (architecture walkthrough + live token exchange)
+# 3. Run the demo (auto-deploys mock server, runs live token exchange)
 ./demo.sh
 ```
 
-`setup.sh` installs SPIRE via Helm and registers the proxy workload. `demo.sh` explains the architecture, verifies the live cluster, and performs a full end-to-end SPIFFE token exchange against the mock server.
+`setup.sh` installs SPIRE via Helm and registers the proxy workload. `demo.sh` auto-deploys the mock server into the cluster, registers a SPIFFE adapter on the proxy, and performs full end-to-end MCP tool calls routed through the proxy with workload identity authentication.
 
 ## Installing SPIRE (Manual Steps)
 
@@ -114,29 +110,44 @@ The mock server provides a complete token exchange and MCP endpoint for demonstr
 
 ### Running the Mock Server
 
-With Docker:
+**In-cluster (recommended)** -- `demo.sh` auto-deploys the mock server into the proxy namespace using `mock-server/k8s.yaml`. The server.py is loaded via ConfigMap, so no container image build is required.
+
+```bash
+# Manual deploy (demo.sh does this automatically):
+kubectl -n suse-ai-up create configmap spiffe-mock-server --from-file=server.py=mock-server/server.py
+kubectl -n suse-ai-up apply -f mock-server/k8s.yaml
+```
+
+The proxy reaches it at `http://spiffe-mock-server.suse-ai-up.svc.cluster.local:8002`.
+
+**Local with Docker:**
 
 ```bash
 docker compose up -d
 ```
 
-Without Docker:
+**Local without Docker:**
 
 ```bash
 python3 mock-server/server.py &
 ```
 
-The server listens on port 8002 by default. Set `MOCK_SERVER_URL` to override.
+Note: When running locally, the proxy pod cannot reach `localhost:8002`. Use the in-cluster deployment for the full end-to-end flow through the proxy.
 
 ### Demo Flow
 
-When the mock server is running, `demo.sh` performs the full round-trip:
+When the proxy and mock server are both running, `demo.sh` performs the full end-to-end round-trip through the proxy:
 
-1. **Mint JWT SVID** -- SPIRE server issues a JWT signed by the trust domain CA
-2. **Token exchange** -- POST the JWT SVID to `/token` as an RFC 8693 `subject_token`
-3. **Receive bearer token** -- Mock server validates the SVID and issues a bearer token
-4. **MCP tool calls** -- POST JSON-RPC requests to `/mcp` with the bearer token
-5. **Verify identity** -- Tool results include `authenticated_via` and `workload_identity` fields
+1. **Register adapter** -- Create a `databricks_spiffe` adapter on the proxy with `type: "spiffe"` and `tokenExchange` config pointing at the mock server
+2. **Call tools via proxy** -- POST `tools/list` and `tools/call` to the proxy's unified `/api/v1/mcp` endpoint
+3. **Proxy fetches SVID** -- Proxy calls SPIRE agent `FetchJWTSVID()` for workload identity
+4. **Token exchange** -- Proxy exchanges the JWT SVID at the mock `/token` endpoint (RFC 8693)
+5. **Forward request** -- Proxy calls mock `/mcp` with the exchanged bearer token
+6. **Verify identity** -- Tool results include `authenticated_via: "spiffe_token_exchange"` and `workload_identity` fields
+
+```
+Client -> Proxy (OAuth) -> SPIRE Agent (JWT SVID) -> Token Exchange -> Mock MCP Server
+```
 
 The mock MCP server exposes three tools: `get_cluster_status`, `execute_sql`, and `get_workspace_info`.
 
@@ -211,7 +222,10 @@ SPIFFE provides cryptographic workload identity without static secrets. The prox
 | `CURL_INSECURE` | `-k` | Set to empty string to enforce TLS verification |
 | `SPIRE_NAMESPACE` | `spire-system` | Namespace where SPIRE is installed |
 | `SPIRE_SERVER_POD` | `spire-server-0` | SPIRE server pod name |
-| `MOCK_SERVER_URL` | `http://localhost:8002` | Mock token exchange + MCP server URL |
+| `PROXY_NAMESPACE` | `suse-ai-up` | Namespace where proxy and mock server run |
+| `MOCK_SERVER_URL` | `http://localhost:8002` | Mock server URL for local testing |
+| `MOCK_SERVER_CLUSTER_URL` | `http://spiffe-mock-server.<ns>.svc.cluster.local:8002` | In-cluster URL the proxy uses to reach mock server |
+| `AUTH_TOKEN` | *(none)* | OAuth token from demo 02 (falls back to dev-mode `X-User-ID: admin`) |
 
 ### setup.sh
 

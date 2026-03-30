@@ -480,8 +480,9 @@ func RunUniproxy() {
 
 	// Create user auth configuration
 	userAuthConfig := &models.UserAuthConfig{
-		Mode:    cfg.AuthMode,
-		DevMode: cfg.DevMode,
+		Mode:        cfg.AuthMode,
+		DevMode:     cfg.DevMode,
+		AdminGroups: cfg.AdminGroups,
 		Local: &models.LocalAuthConfig{
 			DefaultAdminPassword: cfg.AdminPassword,
 			ForcePasswordChange:  cfg.ForcePasswordChange,
@@ -492,14 +493,12 @@ func RunUniproxy() {
 			ClientSecret: cfg.GitHubClientSecret,
 			RedirectURI:  cfg.GitHubRedirectURI,
 			AllowedOrgs:  cfg.GitHubAllowedOrgs,
-			AdminTeams:   cfg.GitHubAdminTeams,
 		},
 		Rancher: &models.RancherAuthConfig{
 			IssuerURL:     cfg.RancherIssuerURL,
 			ClientID:      cfg.RancherClientID,
 			ClientSecret:  cfg.RancherClientSecret,
 			RedirectURI:   cfg.RancherRedirectURI,
-			AdminGroups:   cfg.RancherAdminGroups,
 			FallbackLocal: cfg.RancherFallbackLocal,
 		},
 	}
@@ -512,7 +511,7 @@ func RunUniproxy() {
 	oauthClientStorePath := filepath.Join(cfg.DataDir, "oauth_clients.json")
 	oauthClientStore := clients.NewFileOAuthClientStore(oauthClientStorePath, crypto)
 	oauthServerService := service.NewOAuthServerService(tokenManager, oauthClientStore, auditLogger, cfg)
-	oauthServerHandler := handlers.NewOAuthServerHandler(oauthServerService, auditLogger, cfg)
+	oauthServerHandler := handlers.NewOAuthServerHandler(oauthServerService, userAuthService, auditLogger, cfg)
 	wellKnownHandler := handlers.NewWellKnownHandler(cfg.OAuthIssuerURL)
 
 	// Authorization policy store and engine

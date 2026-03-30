@@ -8,7 +8,7 @@ Provides three endpoints:
   POST /mcp     — Mock MCP server (tools/list and tools/call)
 
 The token endpoint validates that:
-  1. grant_type is urn:ietf:params:oauth:token-type:token-exchange
+  1. grant_type is urn:ietf:params:oauth:grant-type:token-exchange
   2. A subject_token (JWT SVID) is provided
   3. subject_token_type is urn:ietf:params:oauth:token-type:jwt
 
@@ -92,7 +92,7 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(body)
 
         grant_type = params.get("grant_type", [""])[0]
-        if grant_type != "urn:ietf:params:oauth:token-type:token-exchange":
+        if grant_type != "urn:ietf:params:oauth:grant-type:token-exchange":
             self.send_json(400, {
                 "error": "unsupported_grant_type",
                 "error_description": f"Expected token-exchange grant, got: {grant_type}",

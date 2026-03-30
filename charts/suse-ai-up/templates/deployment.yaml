@@ -54,6 +54,14 @@ spec:
               value: "{{ .Values.auth.oauthClientTTLDays }}"
             - name: OAUTH_MAX_CLIENTS
               value: "{{ .Values.auth.oauthMaxClients }}"
+            {{- if .Values.auth.adminUsers }}
+            - name: AIPROXY_ADMIN_USERS
+              value: {{ .Values.auth.adminUsers | join "," | quote }}
+            {{- end }}
+            {{- if .Values.auth.adminGroups }}
+            - name: AIPROXY_ADMIN_GROUPS
+              value: {{ .Values.auth.adminGroups | join "," | quote }}
+            {{- end }}
 {{- if eq .Values.auth.mode "local" }}
             - name: ADMIN_PASSWORD
               value: "{{ .Values.auth.local.defaultAdminPassword }}"
@@ -74,8 +82,6 @@ spec:
               value: "{{ .Values.auth.github.redirectUri }}"
             - name: GITHUB_ALLOWED_ORGS
               value: {{ .Values.auth.github.allowedOrgs | join "," | quote }}
-            - name: GITHUB_ADMIN_TEAMS
-              value: {{ .Values.auth.github.adminTeams | join "," | quote }}
 {{- end }}
 {{- if eq .Values.auth.mode "rancher" }}
             - name: RANCHER_ISSUER_URL
@@ -89,8 +95,6 @@ spec:
                   key: rancher-client-secret
             - name: RANCHER_REDIRECT_URI
               value: "{{ .Values.auth.rancher.redirectUri }}"
-            - name: RANCHER_ADMIN_GROUPS
-              value: {{ .Values.auth.rancher.adminGroups | join "," | quote }}
             - name: RANCHER_FALLBACK_LOCAL
               value: "{{ .Values.auth.rancher.fallbackLocal }}"
 {{- end }}
@@ -99,7 +103,7 @@ spec:
             - name: SPIRE_ENABLED
               value: "true"
             - name: SPIRE_AGENT_SOCKET_PATH
-              value: "{{ default "/run/spire/sockets/agent.sock" .Values.spiffe.agentSocketPath }}"
+              value: "{{ default "/run/spire/agent-sockets/spire-agent.sock" .Values.spiffe.agentSocketPath }}"
             {{- if .Values.spiffe.defaultAudience }}
             - name: SPIFFE_DEFAULT_AUDIENCE
               value: "{{ .Values.spiffe.defaultAudience }}"
@@ -139,7 +143,7 @@ spec:
               readOnly: true
             {{- if .Values.spiffe.enabled }}
             - name: spire-agent-socket
-              mountPath: /run/spire/sockets
+              mountPath: {{ dir (default "/run/spire/agent-sockets/spire-agent.sock" .Values.spiffe.agentSocketPath) }}
               readOnly: true
             {{- end }}
 
@@ -162,7 +166,7 @@ spec:
         {{- if .Values.spiffe.enabled }}
         - name: spire-agent-socket
           hostPath:
-            path: {{ dir (default "/run/spire/sockets/agent.sock" .Values.spiffe.agentSocketPath) }}
+            path: {{ dir (default "/run/spire/agent-sockets/spire-agent.sock" .Values.spiffe.agentSocketPath) }}
             type: DirectoryOrCreate
         {{- end }}
 

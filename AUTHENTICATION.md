@@ -680,7 +680,22 @@ curl -X GET http://localhost:8911/api/v1/users \
 
 ## User Groups and Permissions
 
-### Default Groups
+When a user authenticates via OAuth, their groups are **merged** from two sources:
+
+1. **OIDC groups** from the identity provider (e.g., `data-engineers`, `platform-team`)
+2. **Mapped local groups** based on `AIPROXY_ADMIN_GROUPS` config (e.g., `mcp-admins`)
+
+For example, if `AIPROXY_ADMIN_GROUPS=platform-team` and a user has OIDC groups `["data-engineers", "platform-team"]`, their merged groups will be:
+```
+["data-engineers", "platform-team", "mcp-admins"]
+```
+
+This merged set is used for:
+- **Proxy API permissions** (e.g., checking for `mcp-admins`)
+- **Scope policies** (e.g., mapping `data-engineers` to backend scopes)
+- **Tool authorization** (e.g., restricting tools to specific groups)
+
+### Default Local Groups
 
 - **`mcp-admins`**: Full administrative access to all MCP proxy features
   - **Users**: Create, read, update, delete users
@@ -868,7 +883,7 @@ In this example:
 | `scopes` | `[]string` | Backend scopes to grant when matched |
 | `priority` | `int` | Evaluation order (highest first, default 0) |
 
-User groups and roles are sourced from the OIDC claims in the user's authenticated session.
+User groups include both OIDC groups from the identity provider and mapped local groups (like `mcp-admins`). Roles are sourced from OIDC claims.
 
 ### Scope-Aware Tool Authorization
 
@@ -915,6 +930,152 @@ This policy only allows `drop_table` for users who are both in the `data-enginee
 - `required_scopes` on allow policies: user must have ALL listed scopes for the policy to match
 - If no policies match a tool, access defaults to allowed (adapter-level fallback)
 - Tool filtering applies to both the unified MCP endpoint (`/mcp`) and per-adapter REST endpoints (`/adapters/{name}/tools`)
+
+## Unified MCP Endpoint Authentication
+
+The unified MCP endpoint (`/api/v1/mcp`) aggregates tools, resources, and prompts from all registered adapters into a single interface. It implements a comprehensive authentication and authorization flow.
+
+### Authentication Flow
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐     ┌─────────────┐
+│   Client    │────▶│  OAuth Middleware │────▶│  Unified MCP    │────▶│  Backend    │
+│  (Claude,   │     │  (validates JWT,  │     │  Handler        │     │  Adapter    │
+│   IDE)      │     │   extracts claims)│     │  (authorization │     │  (ServiceNow│
+└─────────────┘     └──────────────────┘     │   + routing)    │     │   Databricks)
+                                              └─────────────────┘     └─────────────┘
+```
+
+1. **Client Authentication**: Client sends request with `Authorization: Bearer <token>` header
+2. **OAuth Middleware**: Validates the JWT token and extracts user claims (user_id, email, groups, roles)
+3. **Context Injection**: `InjectOAuthContext` middleware propagates claims to the request context
+4. **User Context**: Handler extracts authenticated user context including:
+   - `user_id` - User identifier
+   - `username` - Display name
+   - `email` - User email
+   - `groups` - OIDC groups (from Rancher/IdP)
+   - `roles` - OIDC roles
+   - `access_token` - Raw token for downstream auth
+5. **Tool Authorization**: Before listing or calling tools, policies are evaluated with scope awareness
+6. **Downstream Auth**: Requests to backend adapters include appropriate authentication (token exchange, service account, etc.)
+
+### Backwards Compatibility
+
+For development and legacy clients, the endpoint falls back to `X-User-ID` header if no OAuth context is present:
+
+```bash
+# OAuth authentication (recommended)
+curl -X POST https://proxy.example.com/api/v1/mcp \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'
+
+# Legacy X-User-ID header (dev mode only)
+curl -X POST https://proxy.example.com/api/v1/mcp \
+  -H "X-User-ID: alice" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'
+```
+
+### Tool Authorization with Scope Awareness
+
+The unified endpoint implements two-tier authorization:
+
+1. **Scope Resolution**: User's groups/roles are mapped to backend-specific scopes via adapter scope policies
+2. **Tool Filtering**: Authorization policies filter which tools are visible based on groups AND resolved scopes
+
+```
+User Request → Resolve Scopes → Filter Tools → Return Allowed Tools
+     │              │                │
+     │              ▼                ▼
+     │         scope_policies    tool_policies
+     │         (groups → scopes) (groups + scopes → allow/deny)
+     │
+     └── groups: ["data-engineers"]
+         roles: ["analyst"]
+```
+
+#### Example: Scope-Aware Tool Filtering
+
+Given an adapter with scope policies:
+```json
+{
+  "scope_policies": [
+    {"groups": ["data-engineers"], "scopes": ["sql:write", "clusters:manage"]},
+    {"groups": ["analysts"], "scopes": ["sql:read"]}
+  ]
+}
+```
+
+And a tool authorization policy:
+```json
+{
+  "adapter_name": "databricks",
+  "tool_name": "drop_table",
+  "effect": "allow",
+  "allowed_groups": ["data-engineers"],
+  "required_scopes": ["sql:write"]
+}
+```
+
+A user in the `data-engineers` group will:
+1. Have scopes `["sql:write", "clusters:manage"]` resolved
+2. See `drop_table` in `tools/list` (passes both group AND scope check)
+3. Be able to call `drop_table` via `tools/call`
+
+A user in the `analysts` group will:
+1. Have scopes `["sql:read"]` resolved
+2. NOT see `drop_table` in `tools/list` (fails scope check)
+3. Receive a 403 error if they try to call it directly
+
+### Downstream Authentication
+
+When forwarding requests to backend adapters, the unified endpoint applies the configured authentication:
+
+| Auth Type | Flow |
+|-----------|------|
+| `bearer` | Static/dynamic bearer token attached to request |
+| `token_exchange` | User's Rancher ID token exchanged for backend token via RFC 8693 |
+| `service_account` | Proxy credentials + user impersonation header + scope header |
+| `spiffe` (mTLS) | X.509 SVID certificate for workload identity |
+| `spiffe` (JWT) | JWT SVID exchanged for backend token |
+
+#### Token Exchange Flow
+
+```
+┌────────┐    ┌───────────────┐    ┌─────────────────┐    ┌──────────┐
+│ Client │───▶│ Unified MCP   │───▶│ Token Vault     │───▶│ Backend  │
+│        │    │ Handler       │    │ (RFC 8693)      │    │ Token    │
+└────────┘    └───────────────┘    └─────────────────┘    │ Endpoint │
+                     │                     │              └──────────┘
+                     │                     │
+                     ▼                     ▼
+              User's Rancher        Scope policies
+              ID Token              resolve scopes
+              (from session)        for exchange
+```
+
+1. Handler looks up user's OAuth session to get Rancher ID token
+2. Scope policies resolve user-specific scopes based on groups/roles
+3. Token vault exchanges ID token for backend access token with resolved scopes
+4. Backend token is cached and reused until expiration
+
+#### Service Account Flow
+
+```
+┌────────┐    ┌───────────────┐    ┌──────────────┐
+│ Client │───▶│ Unified MCP   │───▶│ Backend      │
+│        │    │ Handler       │    │ Adapter      │
+└────────┘    └───────────────┘    └──────────────┘
+                     │
+                     ├─ Authorization: Basic <sa_credentials>
+                     ├─ X-UserToken: alice@example.com (impersonation)
+                     └─ X-User-Scopes: incident:read incident:write
+```
+
+1. Proxy authenticates with service account credentials (Basic auth)
+2. User identity sent via impersonation header (configurable field: email or username)
+3. Resolved scopes sent via scope header for backend authorization
 
 ## Development Mode
 
@@ -991,6 +1152,15 @@ JWT tokens expire after 24 hours. Use the refresh token flow or re-authenticate.
 - `POST /auth/oauth/callback` - Handle OAuth/OIDC callback
 - `PUT /auth/password` - Change password
 - `POST /auth/logout` - Logout
+
+### Unified MCP Endpoint
+
+- `POST /api/v1/mcp` - Unified MCP JSON-RPC endpoint (authenticated)
+  - Supports methods: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`
+  - Requires `Authorization: Bearer <token>` header (or `X-User-ID` in dev mode)
+  - Returns aggregated tools/resources/prompts from all accessible adapters
+  - Tool names prefixed with adapter name (e.g., `servicenow__get_incident`)
+  - Resource URIs prefixed with adapter scheme (e.g., `servicenow://incident/INC0001`)
 
 ### User and Group Management Endpoints
 

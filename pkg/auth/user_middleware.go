@@ -77,15 +77,20 @@ func (uas *UserAuthService) AuthenticateUser(ctx context.Context, userID, passwo
 	return user, nil
 }
 
-// AuthenticateExternalUser authenticates or creates a user from external provider
-func (uas *UserAuthService) AuthenticateExternalUser(ctx context.Context, provider models.UserAuthProvider, externalID, email, name string, groups []string) (*models.User, error) {
+// AuthenticateExternalUser authenticates or creates a user from external provider.
+// Groups are merged: OIDC groups from the provider + mapped local groups (e.g., mcp-admins).
+func (uas *UserAuthService) AuthenticateExternalUser(ctx context.Context, provider models.UserAuthProvider, externalID, email, name string, oidcGroups []string) (*models.User, error) {
+	// Map OIDC groups to local groups and merge
+	localGroups := uas.mapExternalGroupsToLocal(provider, oidcGroups)
+	mergedGroups := mergeGroups(oidcGroups, localGroups)
+
 	// Try to find existing user
 	user, err := uas.UserStore.GetByExternalID(ctx, string(provider), externalID)
 	if err == nil {
 		// Update user info and last login
 		user.Name = name
 		user.Email = email
-		user.ProviderGroups = groups
+		user.Groups = mergedGroups
 		now := time.Now().UTC()
 		user.LastLoginAt = &now
 		err = uas.UserStore.Update(ctx, *user)
@@ -98,13 +103,12 @@ func (uas *UserAuthService) AuthenticateExternalUser(ctx context.Context, provid
 	// Create new user
 	userID := uas.generateUserID(provider, externalID)
 	user = &models.User{
-		ID:             userID,
-		Name:           name,
-		Email:          email,
-		AuthProvider:   string(provider),
-		ExternalID:     externalID,
-		ProviderGroups: groups,
-		Groups:         uas.mapExternalGroupsToLocal(provider, groups),
+		ID:           userID,
+		Name:         name,
+		Email:        email,
+		AuthProvider: string(provider),
+		ExternalID:   externalID,
+		Groups:       mergedGroups,
 	}
 
 	err = uas.UserStore.Create(ctx, *user)
@@ -202,14 +206,17 @@ func (uas *UserAuthService) MapExternalGroups(provider models.UserAuthProvider, 
 
 // ProvisionExternalUser creates or updates a user with an explicit ID.
 // This is used when the caller controls the user ID (e.g. OAuth sub claim).
-func (uas *UserAuthService) ProvisionExternalUser(ctx context.Context, id, name, email, authProvider, externalID string, providerGroups, localGroups []string) error {
+// Groups are merged: OIDC groups + mapped local groups.
+func (uas *UserAuthService) ProvisionExternalUser(ctx context.Context, id, name, email, authProvider, externalID string, oidcGroups, localGroups []string) error {
+	// Merge OIDC groups with mapped local groups
+	mergedGroups := mergeGroups(oidcGroups, localGroups)
+
 	existing, err := uas.UserStore.Get(ctx, id)
 	if err == nil {
 		// Update existing user
 		existing.Name = name
 		existing.Email = email
-		existing.ProviderGroups = providerGroups
-		existing.Groups = localGroups
+		existing.Groups = mergedGroups
 		now := time.Now().UTC()
 		existing.LastLoginAt = &now
 		return uas.UserStore.Update(ctx, *existing)
@@ -217,15 +224,35 @@ func (uas *UserAuthService) ProvisionExternalUser(ctx context.Context, id, name,
 
 	// Create new user
 	user := models.User{
-		ID:             id,
-		Name:           name,
-		Email:          email,
-		AuthProvider:   authProvider,
-		ExternalID:     externalID,
-		ProviderGroups: providerGroups,
-		Groups:         localGroups,
+		ID:           id,
+		Name:         name,
+		Email:        email,
+		AuthProvider: authProvider,
+		ExternalID:   externalID,
+		Groups:       mergedGroups,
 	}
 	return uas.UserStore.Create(ctx, user)
+}
+
+// mergeGroups combines OIDC groups and local groups, removing duplicates.
+// OIDC groups come first, followed by any local groups not already present.
+func mergeGroups(oidcGroups, localGroups []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+
+	for _, g := range oidcGroups {
+		if !seen[g] {
+			seen[g] = true
+			result = append(result, g)
+		}
+	}
+	for _, g := range localGroups {
+		if !seen[g] {
+			seen[g] = true
+			result = append(result, g)
+		}
+	}
+	return result
 }
 
 // UserAuthMiddleware creates Gin middleware for user authentication

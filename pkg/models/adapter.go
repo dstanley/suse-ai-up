@@ -537,10 +537,9 @@ type User struct {
 	ID                string     `json:"id" example:"user123"`
 	Name              string     `json:"name" example:"John Doe"`
 	Email             string     `json:"email" example:"john@example.com"`
-	Groups            []string   `json:"groups" example:"[\"mcp-users\",\"weather-team\"]"`
+	Groups            []string   `json:"groups" example:"[\"mcp-users\",\"data-engineers\"]"` // Contains both OIDC groups and mapped local groups
 	AuthProvider      string     `json:"auth_provider,omitempty" example:"local"`
 	ExternalID        string     `json:"external_id,omitempty" example:"github123"`
-	ProviderGroups    []string   `json:"provider_groups,omitempty" example:"[\"org/team\"]"`
 	PasswordHash      string     `json:"-"` // Never serialize password hash
 	PasswordChangedAt *time.Time `json:"password_changed_at,omitempty"`
 	LastLoginAt       *time.Time `json:"last_login_at,omitempty"`

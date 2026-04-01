@@ -146,7 +146,6 @@ func (as *AdapterService) CreateAdapter(ctx context.Context, userID, mcpServerID
 				connectionType = models.ConnectionTypeRemoteHttp
 				logging.AdapterLogger.Success("Created remote HTTP config for server %s", server.Name)
 			} else {
-				fmt.Printf("ADAPTER_SERVICE_DEBUG: Will NOT create adapter for server %s (no URL)\n", server.Name)
 				return nil, fmt.Errorf("server %s has no URL for remote connection", server.Name)
 			}
 		}
@@ -390,42 +389,31 @@ func getMapKeys(m map[string]interface{}) []string {
 
 // processCommandTemplates processes template variables in the sidecar command
 func (as *AdapterService) processCommandTemplates(sidecarConfig *models.SidecarConfig, server *models.MCPServer) *models.SidecarConfig {
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: processCommandTemplates called with command: %s\n", sidecarConfig.Command)
 
 	if sidecarConfig == nil || sidecarConfig.Command == "" {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Returning early - sidecarConfig nil or empty command\n")
 		return sidecarConfig
 	}
 
 	// Check if the command contains template variables
 	if !strings.Contains(sidecarConfig.Command, "{{") {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: No template variables found in command\n")
 		return sidecarConfig
 	}
 
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Processing templates in command: %s\n", sidecarConfig.Command)
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Server meta keys: %+v\n", getMapKeys(server.Meta))
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Server meta: %+v\n", server.Meta)
 
 	// Create a copy of the config to modify
 	processedConfig := *sidecarConfig
 
 	// Process template variables based on command type
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: CommandType: %s\n", sidecarConfig.CommandType)
 	switch sidecarConfig.CommandType {
 	case "docker":
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Processing docker templates\n")
 		processedConfig.Command = as.processDockerTemplates(sidecarConfig.Command, server)
 	case "python", "npx", "go":
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Processing python/npx/go templates\n")
 		// For python/npx/go, templates are processed but the command structure may remain similar
 		processedConfig.Command = as.processGenericTemplates(sidecarConfig.Command, server)
 	default:
 		// For unknown types, leave as-is
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Unknown command type %s, skipping template processing\n", sidecarConfig.CommandType)
 	}
 
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Processed command: %s\n", processedConfig.Command)
 	return &processedConfig
 }
 
@@ -438,7 +426,6 @@ func (as *AdapterService) processDockerTemplates(command string, server *models.
 
 // processGenericTemplates processes templates for python/npx commands
 func (as *AdapterService) processGenericTemplates(command string, server *models.MCPServer) string {
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: processGenericTemplates called with command: %s\n", command)
 	// For generic commands, substitute template variables with environment variable references
 	return as.processTemplatesGeneric(command, server)
 }
@@ -460,7 +447,6 @@ func (as *AdapterService) processTemplatesGeneric(command string, server *models
 		// Look up the variable in config.secrets
 		envName := as.lookupTemplatedVariableGeneric(varName, server)
 		if envName == "" {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: Variable %s not found, skipping\n", varName)
 			continue
 		}
 
@@ -469,7 +455,6 @@ func (as *AdapterService) processTemplatesGeneric(command string, server *models
 		templatePattern := fmt.Sprintf("{{%s}}", varName)
 		result = strings.ReplaceAll(result, templatePattern, substitution)
 
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Replaced %s with %s\n", templatePattern, substitution)
 	}
 
 	return result
@@ -477,10 +462,8 @@ func (as *AdapterService) processTemplatesGeneric(command string, server *models
 
 // lookupTemplatedVariableGeneric looks up template variables for generic processing (always substitutes)
 func (as *AdapterService) lookupTemplatedVariableGeneric(varName string, server *models.MCPServer) string {
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: lookupTemplatedVariableGeneric called for varName: %s\n", varName)
 
 	if server.Meta == nil {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: server.Meta is nil\n")
 		return ""
 	}
 
@@ -488,33 +471,27 @@ func (as *AdapterService) lookupTemplatedVariableGeneric(varName string, server 
 	secretsRaw, ok := server.Meta["secrets"]
 	if !ok {
 		// Fall back to config.secrets (old format)
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: secrets not found directly, trying config.secrets\n")
 		configRaw, ok := server.Meta["config"]
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: config not found in server.Meta, available keys: %+v\n", getMapKeys(server.Meta))
 			return ""
 		}
 
 		configMap, ok := configRaw.(map[string]interface{})
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: config is not a map, type: %T\n", configRaw)
 			return ""
 		}
 
 		secretsRaw, ok = configMap["secrets"]
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: secrets not found in config, available config keys: %+v\n", getMapKeys(configMap))
 			return ""
 		}
 	}
 
 	secretsSlice, ok := secretsRaw.([]interface{})
 	if !ok {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: secrets is not a slice, type: %T, value: %+v\n", secretsRaw, secretsRaw)
 		return ""
 	}
 
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Found %d secrets\n", len(secretsSlice))
 
 	for _, secretRaw := range secretsSlice {
 		secretMap, ok := secretRaw.(map[string]interface{})
@@ -531,11 +508,9 @@ func (as *AdapterService) lookupTemplatedVariableGeneric(varName string, server 
 		// Get the environment variable name
 		envName, ok := secretMap["env"].(string)
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: Variable %s missing env field\n", varName)
 			return ""
 		}
 
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Found variable %s -> %s\n", varName, envName)
 		return envName
 	}
 
@@ -555,12 +530,10 @@ func (as *AdapterService) processTemplates(command string, server *models.MCPSer
 		}
 
 		varName := strings.TrimSpace(match[1])
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Found template variable: %s\n", varName)
 
 		// Look up the variable in config.secrets
 		envName := as.lookupTemplatedVariable(varName, server)
 		if envName == "" {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: Variable %s not found or not templated, skipping\n", varName)
 			continue
 		}
 
@@ -569,7 +542,6 @@ func (as *AdapterService) processTemplates(command string, server *models.MCPSer
 		templatePattern := fmt.Sprintf("{{%s}}", varName)
 		result = strings.ReplaceAll(result, templatePattern, substitution)
 
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Replaced %s with %s\n", templatePattern, substitution)
 	}
 
 	return result
@@ -577,10 +549,8 @@ func (as *AdapterService) processTemplates(command string, server *models.MCPSer
 
 // lookupTemplatedVariable looks up a variable name in the server's secrets
 func (as *AdapterService) lookupTemplatedVariable(varName string, server *models.MCPServer) string {
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: lookupTemplatedVariable called for varName: %s\n", varName)
 
 	if server.Meta == nil {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: server.Meta is nil\n")
 		return ""
 	}
 
@@ -588,33 +558,27 @@ func (as *AdapterService) lookupTemplatedVariable(varName string, server *models
 	secretsRaw, ok := server.Meta["secrets"]
 	if !ok {
 		// Fall back to config.secrets (old format)
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: secrets not found directly, trying config.secrets\n")
 		configRaw, ok := server.Meta["config"]
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: config not found in server.Meta, available keys: %+v\n", getMapKeys(server.Meta))
 			return ""
 		}
 
 		configMap, ok := configRaw.(map[string]interface{})
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: config is not a map, type: %T\n", configRaw)
 			return ""
 		}
 
 		secretsRaw, ok = configMap["secrets"]
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: secrets not found in config, available config keys: %+v\n", getMapKeys(configMap))
 			return ""
 		}
 	}
 
 	secretsSlice, ok := secretsRaw.([]interface{})
 	if !ok {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: secrets is not a slice, type: %T, value: %+v\n", secretsRaw, secretsRaw)
 		return ""
 	}
 
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Found %d secrets\n", len(secretsSlice))
 
 	for _, secretRaw := range secretsSlice {
 		secretMap, ok := secretRaw.(map[string]interface{})
@@ -633,11 +597,9 @@ func (as *AdapterService) lookupTemplatedVariable(varName string, server *models
 		// Get the environment variable name
 		envName, ok := secretMap["env"].(string)
 		if !ok {
-			fmt.Printf("ADAPTER_SERVICE_DEBUG: Variable %s missing env field\n", varName)
 			return ""
 		}
 
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: Found templated variable %s -> %s\n", varName, envName)
 		return envName
 	}
 
@@ -646,36 +608,29 @@ func (as *AdapterService) lookupTemplatedVariable(varName string, server *models
 
 // getSidecarConfig extracts the complete sidecar configuration from server metadata
 func (as *AdapterService) getSidecarConfig(server *models.MCPServer) *models.SidecarConfig {
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: getSidecarConfig called for server %s\n", server.Name)
 
 	if server.Meta == nil {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: server.Meta is nil\n")
 		return nil
 	}
 
 	sidecarConfigRaw, ok := server.Meta["sidecarConfig"]
 	if !ok {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: sidecarConfig not found in meta\n")
 		return nil
 	}
 
 	configMap, ok := sidecarConfigRaw.(map[string]interface{})
 	if !ok {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: sidecarConfig is not a map, type: %T, value: %v\n", sidecarConfigRaw, sidecarConfigRaw)
 		return nil
 	}
 
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: sidecarConfig keys: %v\n", getMapKeys(configMap))
 
 	commandType, ok := configMap["commandType"].(string)
 	if !ok || commandType == "" {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: commandType not found or empty\n")
 		return nil
 	}
 
 	command, ok := configMap["command"].(string)
 	if !ok || command == "" {
-		fmt.Printf("ADAPTER_SERVICE_DEBUG: command not found or empty\n")
 		return nil
 	}
 
@@ -706,16 +661,13 @@ func (as *AdapterService) getSidecarConfig(server *models.MCPServer) *models.Sid
 		if sourceMap, ok := sourceInfo.(map[string]interface{}); ok {
 			if project, ok := sourceMap["project"].(string); ok && project != "" {
 				sidecarConfig.ProjectURL = project
-				fmt.Printf("ADAPTER_SERVICE_DEBUG: Found project URL: %s\n", project)
 			}
 			if release, ok := sourceMap["release"].(string); ok && release != "" {
 				sidecarConfig.ReleaseURL = release
-				fmt.Printf("ADAPTER_SERVICE_DEBUG: Found release URL: %s\n", release)
 			}
 		}
 	}
 
-	fmt.Printf("ADAPTER_SERVICE_DEBUG: Created sidecar config: %+v\n", sidecarConfig)
 	return sidecarConfig
 }
 

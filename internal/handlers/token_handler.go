@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strconv"
 	"time"
@@ -224,7 +225,7 @@ func (th *TokenHandler) ValidateToken(c *gin.Context) {
 	}
 
 	// Fallback to legacy validation
-	if adapter.Authentication != nil && adapter.Authentication.BearerToken != nil && adapter.Authentication.BearerToken.Token == token {
+	if adapter.Authentication != nil && adapter.Authentication.BearerToken != nil && subtle.ConstantTimeCompare([]byte(adapter.Authentication.BearerToken.Token), []byte(token)) == 1 {
 		c.JSON(http.StatusOK, gin.H{
 			"valid":   true,
 			"adapter": adapterName,

@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -281,7 +282,8 @@ func (s *OAuthServerService) RevokeToken(token, tokenTypeHint, clientID string) 
 	// Try to find and remove from sessions by access token
 	s.sessionsMu.Lock()
 	for id, session := range s.sessions {
-		if session.AccessToken == token || session.RefreshToken == token {
+		if subtle.ConstantTimeCompare([]byte(session.AccessToken), []byte(token)) == 1 ||
+			subtle.ConstantTimeCompare([]byte(session.RefreshToken), []byte(token)) == 1 {
 			if session.ClientID == clientID {
 				// Remove refresh token from index
 				s.refreshIndexMu.Lock()
@@ -310,7 +312,7 @@ func (s *OAuthServerService) GetSessionByAccessToken(accessToken string) (*model
 	defer s.sessionsMu.RUnlock()
 
 	for _, session := range s.sessions {
-		if session.AccessToken == accessToken {
+		if subtle.ConstantTimeCompare([]byte(session.AccessToken), []byte(accessToken)) == 1 {
 			return session, nil
 		}
 	}

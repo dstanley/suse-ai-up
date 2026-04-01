@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 
@@ -95,8 +96,8 @@ func (aam *AdapterAuthMiddleware) Middleware() gin.HandlerFunc {
 				tokenInfo, err := aam.tokenManager.ValidateToken(token, adapterURL)
 				if err == nil {
 					// JWT token validation successful
-					fmt.Printf("AUTH: Successful JWT authentication for adapter %s from %s (token: %s)\n",
-						adapterName, clientIP, tokenInfo.TokenID)
+					fmt.Printf("AUTH: Successful JWT authentication for adapter %s from %s\n",
+						adapterName, clientIP)
 					c.Set("user", tokenInfo.Subject)
 					c.Set("auth_type", "bearer_jwt")
 					c.Set("adapter_name", adapterName)
@@ -110,7 +111,7 @@ func (aam *AdapterAuthMiddleware) Middleware() gin.HandlerFunc {
 			}
 
 			// Fallback to legacy token validation (string comparison)
-			if adapter.Authentication.BearerToken == nil || token != adapter.Authentication.BearerToken.Token {
+			if adapter.Authentication.BearerToken == nil || subtle.ConstantTimeCompare([]byte(token), []byte(adapter.Authentication.BearerToken.Token)) == 0 {
 				fmt.Printf("AUTH: Invalid legacy token for adapter %s from %s\n", adapterName, clientIP)
 				c.JSON(http.StatusUnauthorized, AuthError{
 					Code:    ErrCodeInvalidToken,

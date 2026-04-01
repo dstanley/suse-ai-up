@@ -111,7 +111,8 @@ func (h *AdapterMCPHandler) routeToAdapter(c *gin.Context, adapter *models.Adapt
 			return
 		}
 		if err := h.stdioToHTTPAdapter.HandleRequest(mockContext, *adapter); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Stdio adapter error: %v", err)})
+			fmt.Printf("Stdio adapter error for %s: %v\n", adapter.Name, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Adapter request failed"})
 		}
 	case models.ConnectionTypeRemoteHttp, models.ConnectionTypeStreamableHttp, models.ConnectionTypeSSE:
 		if h.remoteHTTPPlugin == nil {
@@ -119,7 +120,8 @@ func (h *AdapterMCPHandler) routeToAdapter(c *gin.Context, adapter *models.Adapt
 			return
 		}
 		if err := h.remoteHTTPPlugin.ProxyRequest(mockContext, *adapter, h.sessionStore); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Remote HTTP plugin error: %v", err)})
+			fmt.Printf("Remote HTTP plugin error for %s: %v\n", adapter.Name, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Adapter request failed"})
 		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Unsupported connection type: %s", adapter.ConnectionType)})
@@ -153,7 +155,8 @@ func (h *AdapterMCPHandler) ToolsList(c *gin.Context) {
 
 	resp, err := h.makeMCPRequestWithSession(c.Request.Context(), adapter.URL, toolsListRequest, adapter.Authentication)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("MCP request failed: %v", err)})
+		fmt.Printf("MCP request failed for %s: %v\n", adapter.Name, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "MCP request failed"})
 		return
 	}
 	defer resp.Body.Close()

@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -184,7 +187,7 @@ func LoadConfig() *Config {
 
 		AuthMode:            getEnv("AUTH_MODE", "development"),
 		DevMode:             getEnvBool("DEV_MODE", true),
-		AdminPassword:       getEnv("ADMIN_PASSWORD", "admin"),
+		AdminPassword:       getEnv("ADMIN_PASSWORD", generateSecureDefault()),
 		ForcePasswordChange: getEnvBool("FORCE_PASSWORD_CHANGE", true),
 		PasswordMinLength:   getEnvInt("PASSWORD_MIN_LENGTH", 8),
 		AdminUsers:          parseStringSlice(getEnv("AIPROXY_ADMIN_USERS", "")),
@@ -279,6 +282,20 @@ func parseStringSlice(value string) []string {
 		}
 	}
 	return result
+}
+
+// generateSecureDefault generates a random 24-character password for use as
+// a default admin password when ADMIN_PASSWORD is not set. The generated
+// password is logged to stdout so the operator can retrieve it on first boot.
+func generateSecureDefault() string {
+	b := make([]byte, 18) // 18 bytes → 24 base64 chars
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to a fixed but obvious placeholder that forces manual setup
+		return "CHANGE-ME-INSECURE-DEFAULT"
+	}
+	password := base64.URLEncoding.EncodeToString(b)
+	fmt.Printf("NOTICE: Generated random admin password (set ADMIN_PASSWORD env to override): %s\n", password)
+	return password
 }
 
 // parseInitialUsers parses initial users from JSON string

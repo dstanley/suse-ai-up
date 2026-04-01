@@ -18,6 +18,7 @@ import (
 
 	"suse-ai-up/pkg/deployer"
 	"suse-ai-up/pkg/models"
+	"suse-ai-up/pkg/security"
 )
 
 // SidecarManager manages sidecar container deployments for MCP servers
@@ -474,9 +475,15 @@ func (sm *SidecarManager) deployGoSidecar(ctx context.Context, adapter models.Ad
 	return sm.deployGenericSidecar(ctx, adapter, golangImage, adapter.SidecarConfig.Command)
 }
 
-// prepareGoReleaseCommand prepares a command to download and run a pre-built binary from GitHub/Gitea releases
+// prepareGoReleaseCommand prepares a command to download and run a pre-built binary from GitHub/Gitea releases.
+// Caller must validate inputs before calling this method.
 func (sm *SidecarManager) prepareGoReleaseCommand(adapter models.AdapterResource, originalCommand string) string {
 	projectURL := adapter.SidecarConfig.ProjectURL
+
+	// Defence-in-depth: reject URLs with shell metacharacters even if caller validated
+	if security.ValidateGitURL(projectURL) != nil {
+		return fmt.Sprintf("echo 'ERROR: invalid project URL' && exit 1")
+	}
 
 	// Extract owner/repo from project URL
 	var owner, repo, apiBase string
@@ -558,8 +565,26 @@ func (sm *SidecarManager) detectPlatform() string {
 	return "linux-amd64"
 }
 
-// deployGenericSidecar deploys a sidecar using a generic container image and command
+// deployGenericSidecar deploys a sidecar using a generic container image and command.
+// It validates all user-supplied inputs before interpolating into shell commands.
 func (sm *SidecarManager) deployGenericSidecar(ctx context.Context, adapter models.AdapterResource, image, command string) error {
+	// Validate adapter ID (used in Kubernetes resource names)
+	if err := security.ValidateIdentifier(adapter.ID, "adapter ID"); err != nil {
+		return fmt.Errorf("sidecar deployment blocked: %w", err)
+	}
+
+	// Validate project URL if present (used in git clone commands)
+	if adapter.SidecarConfig != nil && adapter.SidecarConfig.ProjectURL != "" {
+		if err := security.ValidateGitURL(adapter.SidecarConfig.ProjectURL); err != nil {
+			return fmt.Errorf("sidecar deployment blocked: invalid project URL: %w", err)
+		}
+	}
+
+	// Validate command does not contain obvious shell injection
+	if err := security.ValidateShellArg(command, "sidecar command"); err != nil {
+		return fmt.Errorf("sidecar deployment blocked: %w", err)
+	}
+
 	// If we have a Kubernetes client, use it directly for deployment
 	if sm.kubeClient != nil {
 		fmt.Printf("SIDECAR_MANAGER: Using Kubernetes Go client for generic adapter %s\n", adapter.ID)

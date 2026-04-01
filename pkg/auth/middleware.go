@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"suse-ai-up/pkg/security"
 )
 
 // DevelopmentAuthMiddleware is a simple middleware for development
@@ -132,8 +133,9 @@ func MCPOAuthMiddleware(tokenManager *TokenManager) gin.HandlerFunc {
 
 		// Set user identity in context and header for downstream handlers
 		if sub, ok := claims["sub"].(string); ok {
-			c.Set("user_id", sub)
-			c.Request.Header.Set("X-User-ID", sub)
+			safeSub := security.SanitizeForHeader(sub)
+			c.Set("user_id", safeSub)
+			c.Request.Header.Set("X-User-ID", safeSub)
 		}
 		if username, ok := claims["username"].(string); ok {
 			c.Set("username", username)

@@ -15,6 +15,7 @@ import (
 	"suse-ai-up/pkg/mcp"
 	"suse-ai-up/pkg/models"
 	"suse-ai-up/pkg/proxy"
+	"suse-ai-up/pkg/security"
 	"suse-ai-up/pkg/services"
 )
 
@@ -159,6 +160,17 @@ func (as *AdapterService) CreateAdapter(ctx context.Context, userID, mcpServerID
 	if connectionType == models.ConnectionTypeRemoteHttp && sidecarConfig != nil {
 		// For HTTP remote connections, use the command as the remote URL
 		remoteUrl = sidecarConfig.Command
+	}
+
+	// Validate remote URL to prevent SSRF attacks against internal services
+	if remoteUrl != "" && connectionType == models.ConnectionTypeRemoteHttp {
+		if err := security.ValidateRemoteURL(remoteUrl); err != nil {
+			// Allow in-cluster .svc.cluster.local URLs (legitimate K8s service discovery)
+			if !strings.Contains(remoteUrl, ".svc.cluster.local") {
+				logging.AdapterLogger.Error("SSRF validation failed for URL %s: %v", security.SanitizeForLog(remoteUrl), err)
+				return nil, fmt.Errorf("invalid remote URL: %w", err)
+			}
+		}
 	}
 
 	// Determine initial status

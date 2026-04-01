@@ -16,6 +16,7 @@ import (
 	"suse-ai-up/pkg/auth"
 	"suse-ai-up/pkg/logging"
 	"suse-ai-up/pkg/models"
+	"suse-ai-up/pkg/security"
 	"suse-ai-up/pkg/services"
 	adaptersvc "suse-ai-up/pkg/services/adapters"
 )
@@ -245,7 +246,7 @@ func (h *UnifiedMCPHandler) HandleUnifiedMCP(w http.ResponseWriter, r *http.Requ
 	uc := h.userContextFromRequest(r)
 	userID := uc.UserID
 	if userID == "" {
-		userID = r.Header.Get("X-User-ID")
+		userID = security.SanitizeForHeader(r.Header.Get("X-User-ID"))
 		if userID == "" {
 			userID = "default-user"
 		}
@@ -881,9 +882,9 @@ func (h *UnifiedMCPHandler) forwardToAdapter(ctx context.Context, adapter *model
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	// Forward X-User-ID for backwards compatibility
+	// Forward X-User-ID for backwards compatibility (sanitize to prevent header injection)
 	if userID := reqCtx.headers.Get("X-User-ID"); userID != "" {
-		httpReq.Header.Set("X-User-ID", userID)
+		httpReq.Header.Set("X-User-ID", security.SanitizeForHeader(userID))
 	}
 
 	// Apply downstream authentication (token exchange, service account, SPIFFE, etc.)

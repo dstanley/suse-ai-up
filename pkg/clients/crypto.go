@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -32,15 +33,9 @@ func NewStorageCrypto(keyString string) (*StorageCrypto, error) {
 		return nil, fmt.Errorf("encryption key must be at least 16 characters long")
 	}
 
-	// Pad to 32 bytes if needed for AES-256, or truncate
-	if len(key) > 32 {
-		key = key[:32]
-	} else if len(key) < 32 {
-		// Pad with zeros (simple approach, better would be KDF)
-		padded := make([]byte, 32)
-		copy(padded, key)
-		key = padded
-	}
+	// Derive a fixed 32-byte key using SHA-256 for AES-256
+	hash := sha256.Sum256(key)
+	key = hash[:]
 
 	return &StorageCrypto{key: key}, nil
 }

@@ -158,7 +158,9 @@ func (h *OAuthServerHandler) Authorize(c *gin.Context) {
 	params.Set("rancher_pkce_verifier", rancherVerifier)
 
 	// Store in a secure cookie for the callback to read
-	c.SetCookie("oauth_params", params.Encode(), 600, "/", "", false, true)
+	// Set Secure flag based on whether we're running in dev mode
+	secureCookie := !h.cfg.DevMode
+	c.SetCookie("oauth_params", params.Encode(), 600, "/", "", secureCookie, true)
 
 	// Build Rancher OIDC authorization URL and redirect
 	rancherAuthURL := h.buildRancherAuthURL(state, rancherChallenge)
@@ -382,7 +384,8 @@ func (h *OAuthServerHandler) Callback(c *gin.Context) {
 	}
 
 	// Clear the oauth_params cookie
-	c.SetCookie("oauth_params", "", -1, "/", "", false, true)
+	secureCookie := !h.cfg.DevMode
+	c.SetCookie("oauth_params", "", -1, "/", "", secureCookie, true)
 
 	h.auditLogger.Log(auth.AuditEvent{
 		EventType: auth.AuditEventLogin,

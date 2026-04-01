@@ -391,6 +391,27 @@ func (s *OAuthServerService) issueTokens(clientID, userID string, userClaims map
 	}
 
 	s.sessionsMu.Lock()
+	// Cap in-memory sessions to prevent unbounded memory growth.
+	// When the cap is reached, evict the oldest session.
+	const maxSessions = 10000
+	if len(s.sessions) >= maxSessions {
+		var oldestID string
+		var oldestTime time.Time
+		for id, sess := range s.sessions {
+			if oldestID == "" || sess.CreatedAt.Before(oldestTime) {
+				oldestID = id
+				oldestTime = sess.CreatedAt
+			}
+		}
+		if oldestID != "" {
+			if oldSession, ok := s.sessions[oldestID]; ok {
+				s.refreshIndexMu.Lock()
+				delete(s.refreshIndex, oldSession.RefreshToken)
+				s.refreshIndexMu.Unlock()
+			}
+			delete(s.sessions, oldestID)
+		}
+	}
 	s.sessions[sessionID] = session
 	s.sessionsMu.Unlock()
 

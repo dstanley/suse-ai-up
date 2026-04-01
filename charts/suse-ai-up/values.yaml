@@ -83,7 +83,7 @@ auth:
 
   # Local authentication (password-based)
   local:
-    defaultAdminPassword: "admin"  # Initial admin password
+    defaultAdminPassword: ""  # If empty, a random password is generated at startup (see pod logs)
     forcePasswordChange: true     # Force password change on first login
     passwordMinLength: 8          # Minimum password length
 

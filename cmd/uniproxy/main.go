@@ -435,6 +435,9 @@ func RunUniproxy() {
 		})
 	}))
 
+	// Limit request body size globally (2 MB) to prevent memory exhaustion
+	r.Use(auth.MaxBodySize(2 << 20))
+
 	// Add OTEL Gin middleware (if enabled)
 	if cfg.OtelEnabled {
 		r.Use(otelgin.Middleware("suse-ai-up"))
@@ -768,8 +771,8 @@ func RunUniproxy() {
 		oauth.POST("/revoke", oauthServerHandler.Revoke)
 	}
 
-	// Authorization policy admin endpoints (OAuth-protected)
-	authPolicies := r.Group("/api/v1/auth/policies", auth.MCPOAuthMiddleware(tokenManager))
+	// Authorization policy admin endpoints (OAuth-protected, admin-only)
+	authPolicies := r.Group("/api/v1/auth/policies", auth.MCPOAuthMiddleware(tokenManager), auth.RequireAdminGroup())
 	{
 		authPolicies.GET("", oauthServerHandler.ListPolicies)
 		authPolicies.POST("", oauthServerHandler.CreatePolicy)
@@ -941,8 +944,13 @@ func RunUniproxy() {
 
 	// Start server
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 
 	log.Printf("DEBUG: About to start Gin HTTP server on port %s", cfg.Port)

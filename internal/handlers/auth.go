@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,15 +16,45 @@ import (
 
 // AuthHandler handles authentication endpoints
 type AuthHandler struct {
-	authService *auth.UserAuthService
+	authService    *auth.UserAuthService
+	loginLimiter   map[string]*loginAttempt
+	limiterMu      sync.Mutex
+}
+
+// loginAttempt tracks failed login attempts per IP for rate limiting
+type loginAttempt struct {
+	count    int
+	windowStart time.Time
 }
 
 // NewAuthHandler creates a new auth handler
 func NewAuthHandler(authService *auth.UserAuthService) *AuthHandler {
-	return &AuthHandler{
-		authService: authService,
+	h := &AuthHandler{
+		authService:  authService,
+		loginLimiter: make(map[string]*loginAttempt),
 	}
+	// Cleanup stale rate limit entries every 10 minutes
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.limiterMu.Lock()
+			now := time.Now()
+			for ip, attempt := range h.loginLimiter {
+				if now.Sub(attempt.windowStart) > 15*time.Minute {
+					delete(h.loginLimiter, ip)
+				}
+			}
+			h.limiterMu.Unlock()
+		}
+	}()
+	return h
 }
+
+const (
+	loginRateLimitWindow  = 15 * time.Minute
+	loginRateLimitMax     = 10 // max failed attempts per window
+)
 
 // LoginRequest represents a login request
 type LoginRequest struct {
@@ -66,6 +97,13 @@ type ChangePasswordRequest struct {
 // @Failure 401 {object} ErrorResponse
 // @Router /api/v1/auth/login [post]
 func (h *AuthHandler) Login(c *gin.Context) {
+	// Rate limit login attempts per IP
+	clientIP := c.ClientIP()
+	if h.isLoginRateLimited(clientIP) {
+		c.JSON(http.StatusTooManyRequests, ErrorResponse{Error: "Too many login attempts. Try again later."})
+		return
+	}
+
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "Invalid JSON: " + err.Error()})
@@ -79,6 +117,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	user, err := h.authService.AuthenticateUser(c.Request.Context(), req.UserID, req.Password)
 	if err != nil {
+		h.recordFailedLogin(clientIP)
 		c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "Invalid credentials"})
 		return
 	}
@@ -307,13 +346,11 @@ func (h *AuthHandler) GetAuthMode(c *gin.Context) {
 	// In production, you might want to limit what information is exposed
 	if config.Local != nil {
 		response.Local = &struct {
-			DefaultAdminPassword string `json:"default_admin_password,omitempty"`
-			ForcePasswordChange  bool   `json:"force_password_change"`
-			PasswordMinLength    int    `json:"password_min_length"`
+			ForcePasswordChange bool `json:"force_password_change"`
+			PasswordMinLength   int  `json:"password_min_length"`
 		}{
-			DefaultAdminPassword: config.Local.DefaultAdminPassword,
-			ForcePasswordChange:  config.Local.ForcePasswordChange,
-			PasswordMinLength:    config.Local.PasswordMinLength,
+			ForcePasswordChange: config.Local.ForcePasswordChange,
+			PasswordMinLength:   config.Local.PasswordMinLength,
 		}
 	}
 
@@ -344,6 +381,38 @@ func (h *AuthHandler) GetAuthMode(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// isLoginRateLimited checks if an IP has exceeded the login attempt limit.
+func (h *AuthHandler) isLoginRateLimited(ip string) bool {
+	h.limiterMu.Lock()
+	defer h.limiterMu.Unlock()
+
+	attempt, exists := h.loginLimiter[ip]
+	if !exists {
+		return false
+	}
+
+	// Reset window if expired
+	if time.Since(attempt.windowStart) > loginRateLimitWindow {
+		delete(h.loginLimiter, ip)
+		return false
+	}
+
+	return attempt.count >= loginRateLimitMax
+}
+
+// recordFailedLogin increments the failed login counter for an IP.
+func (h *AuthHandler) recordFailedLogin(ip string) {
+	h.limiterMu.Lock()
+	defer h.limiterMu.Unlock()
+
+	attempt, exists := h.loginLimiter[ip]
+	if !exists || time.Since(attempt.windowStart) > loginRateLimitWindow {
+		h.loginLimiter[ip] = &loginAttempt{count: 1, windowStart: time.Now()}
+		return
+	}
+	attempt.count++
 }
 
 // buildGitHubAuthURL builds GitHub OAuth authorization URL
@@ -581,9 +650,8 @@ type AuthModeResponse struct {
 	Mode    string `json:"mode"`
 	DevMode bool   `json:"dev_mode"`
 	Local   *struct {
-		DefaultAdminPassword string `json:"default_admin_password,omitempty"`
-		ForcePasswordChange  bool   `json:"force_password_change"`
-		PasswordMinLength    int    `json:"password_min_length"`
+		ForcePasswordChange bool `json:"force_password_change"`
+		PasswordMinLength   int  `json:"password_min_length"`
 	} `json:"local,omitempty"`
 	GitHub *struct {
 		ClientID    string   `json:"client_id,omitempty"`

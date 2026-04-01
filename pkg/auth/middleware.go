@@ -174,3 +174,54 @@ func MCPOAuthMiddleware(tokenManager *TokenManager) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// RequireAdminGroup is a Gin middleware that checks if the authenticated user
+// belongs to the "mcp-admins" group (set by MCPOAuthMiddleware from JWT claims).
+// Must be chained after MCPOAuthMiddleware.
+func RequireAdminGroup() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groups, exists := c.Get("groups")
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":             "insufficient_scope",
+				"error_description": "Admin group membership required",
+			})
+			c.Abort()
+			return
+		}
+
+		groupStrs, ok := groups.([]string)
+		if !ok {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":             "insufficient_scope",
+				"error_description": "Admin group membership required",
+			})
+			c.Abort()
+			return
+		}
+
+		for _, g := range groupStrs {
+			if g == "mcp-admins" {
+				c.Next()
+				return
+			}
+		}
+
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":             "insufficient_scope",
+			"error_description": "Admin group membership required",
+		})
+		c.Abort()
+	}
+}
+
+// MaxBodySize returns a Gin middleware that limits the request body to the
+// specified number of bytes. Requests exceeding the limit receive 413.
+func MaxBodySize(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		}
+		c.Next()
+	}
+}
